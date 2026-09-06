@@ -93,6 +93,13 @@ def _target_name(key: str, src: Path) -> str:
         "transcript_txt": "transcript.txt",
         "transcript_srt": "transcript.srt",
         "transcript_json": "transcript.json",
+        # v0.3 artefacts
+        "grounded_json": "script_grounded.json",
+        "quality_json": "quality.json",
+        "quality_md": "quality.md",
+        "understanding_json": "understanding.json",
+        "edit_plan_json": "edit_plan.json",
+        "overlay_json": "overlay.json",
     }
     return mapping.get(key, src.name)
 

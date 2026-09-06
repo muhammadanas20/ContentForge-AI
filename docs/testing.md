@@ -2,7 +2,7 @@
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                      # full suite (~40 s; needs ffmpeg)
+pytest                      # full suite (~2 min; needs ffmpeg)
 pytest -m "not ffmpeg"      # pure-python tests only (config, segments, captions, AI, db, analytics)
 pytest tests/test_pipeline.py -k resume -vv
 pytest --cov=contentforge --cov-report=term-missing
@@ -25,9 +25,16 @@ ruff check contentforge tests
 | `test_pipeline.py` | **end-to-end runs** with stubbed Whisper/TTS: full flow, no-narration fallback, crash → resume, `--from` step, bad input |
 | `test_watcher_scheduler_app.py` | watcher detection/dedupe/partial files, scheduler registration, app façade dedupe/retry/reports, CLI commands |
 | `test_dashboard.py` | Every Streamlit page renders via `AppTest` |
+| `test_video_understanding.py` | **v0.3**: frame sampling, OCR regions, click/scroll/typing/reveal/idle detection against the recording's ground truth, cursor accuracy, JSON round-trip, tesseract-less fallback, frame caps |
+| `test_framing_editor.py` | **v0.3**: view scoring (sliced text penalised, context beats cursor), max-zoom cap, OCR preservation, adaptive framing, smooth camera path, dead-time removal + result hold, viral structure, contiguous shots, click remapping, card geometry, point mapping |
+| `test_script_narration_captions.py` | **v0.3**: every script segment maps to a shot, structure, no invented features, spoken-word budget, degraded fallback, narration length matches the timeline, `atempo` fitting bounds, caption chunking, safe-area band choice, long-word shrinking, ASS structure |
+| `test_cover_quality.py` | **v0.3**: cover frame scoring picks the result moment, 1080x1920 branded output, multi-concept selection, and each quality gate (pass + failure modes) |
+| `test_smart_pipeline.py` | **v0.3 end-to-end**: the whole smart pipeline on the synthetic tutorial recording, then *visual* assertions on the rendered frames (page visible, captions burned in, branded cover), quality report, package contents, work-dir cleanup |
 
 Fixtures (`conftest.py`): `settings` (config anchored in a temp data dir), `ffmpeg`, `sample_video` (synthetic 6 s
-1280×720 clip with a 2 s silence gap), `fake_transcript`.
+1280×720 clip with a 2 s silence gap), `fake_transcript`, plus the v0.3 session fixtures `tutorial_recording`
+(a 12 s synthetic student-offers screen recording with ground-truth clicks/scroll/typing/reveal/idle, rendered once)
+and `understanding` (`understand_video` on it, analysed once).
 
 Whisper and TTS models are never downloaded in tests - `FakeTranscriber` / `FakeTTS` in `test_pipeline.py` stand in.
 To exercise the real engines manually: `contentforge process data/input/<file>.mp4 --log-level DEBUG`.

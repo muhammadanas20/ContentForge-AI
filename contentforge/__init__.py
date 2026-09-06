@@ -19,5 +19,5 @@ The package is organised as a set of loosely coupled modules that are composed b
 * ``dashboard``   - Streamlit UI.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["__version__"]

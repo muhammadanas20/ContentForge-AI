@@ -8,6 +8,18 @@
 4. **Composable** - each stage is a class with one job; the runner only knows the step list.
 5. **Boring infrastructure** - SQLite, YAML, subprocess-driven FFmpeg. Nothing exotic to operate on a laptop.
 
+## Two pipelines
+
+`pipeline.mode` selects the step list (`pipeline/smart_steps.py::steps_for_mode`):
+
+* **smart (v0.3, default)** - understanding → content-aware edit → grounded narration →
+  designed 9:16 composition → captions/mix → cover → quality gates → package.
+  See [docs/smart-pipeline.md](smart-pipeline.md).
+* **classic (v0.2)** - transcript → script → cursor crop → subtitles → package.
+  Every v0.2 step class is still present and tested.
+
+Both share the runner, the job context, the database, packaging, archiving and cleanup.
+
 ## Module map
 
 ```
@@ -46,6 +58,17 @@
 | `ai.script_writer` | Transcript → hook/body/CTA script; grounding guard | `ScriptWriter`, `Script` |
 | `ai.tts` | Piper / Kokoro / Edge behind `TTSEngine`; sentence timings | `get_tts_engine` |
 | `ai.social` | Caption, CTA, comment prompt, SEO, hashtags with rotation | `SocialWriter`, `HashtagGenerator` |
+| `models.schemas` | v0.3 data model shared by every stage (frames, actions, understanding, edit plan, grounded script, quality report) | `VideoUnderstanding`, `EditPlan`, `GroundedScript`, `QualityReport` |
+| `processing.ocr` | Pluggable text detection: tesseract when installed, OpenCV morphology otherwise | `get_ocr_backend`, `HeuristicTextDetector` |
+| `processing.video_understanding` | One decode pass → frames, OCR boxes, cursor, changes → action timeline | `understand_video` |
+| `processing.framing` | Content-aware 9:16 view scoring + smoothed camera path | `plan_framing`, `score_view`, `preservation_report` |
+| `processing.editor` | Edit plan (keep ranges, cuts, roles, zooms) and the Reel renderer | `plan_edit`, `SmartEditor` |
+| `ai.narration` | Grounded script → timeline-aligned narration track | `NarrationBuilder` |
+| `media.captions` | Word-highlighted captions, click rings, watermark, progress bar (own ASS) | `build_overlay_plan`, `ReelOverlayRenderer` |
+| `media.audio` | Narration + ducked music + click ticks, limited and normalised | `ReelAudioMixer` |
+| `media.cover` | Frame scoring + multi-concept branded cover | `CoverGenerator`, `score_frames` |
+| `pipeline.quality` | Twelve gates between a render and a package | `QualityGate` |
+| `pipeline.smart_steps` | The v0.3 step list and its configuration mapping | `SMART_STEPS`, `steps_for_mode` |
 | `processing.segments` | Pure edit-decision maths: silences → keep-list, `Timeline` remap | `build_keep_ranges`, `Timeline` |
 | `processing.analysis` | OpenCV motion + activity centroid sampling | `analyse_video` |
 | `processing.video_editor` | Two-pass FFmpeg render: cut/crop/zoom, then overlays+mux | `VideoEditor`, `plan_crop` |

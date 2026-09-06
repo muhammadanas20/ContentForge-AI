@@ -9,7 +9,9 @@
 | FFmpeg **with libass, libfreetype, libx264** | Fedora needs RPM Fusion for the full build |
 | 4 GB RAM (8 GB comfortable) | Whisper `base` + FFmpeg fit easily; `small`/`medium` need more |
 | ~3 GB disk for models | Whisper base ≈ 150 MB, Piper voice ≈ 60 MB, Kokoro ≈ 350 MB + torch |
-| A DejaVu / Liberation TrueType font | Used for subtitles and thumbnails |
+| A DejaVu / Liberation TrueType font | Used for subtitles, covers and Reel captions |
+| *(optional)* `tesseract-ocr` | Lets the v0.3 understanding stage read the screen. Without it the pipeline falls back to a dependency-free text-region detector: framing, caption placement and the quality gates still work, but scripts cannot quote on-screen text |
+| *(optional)* `espeak-ng` | Zero-setup offline narration fallback. `pip install espeakng-loader` provides a bundled library if the system package is unavailable |
 
 GPU is optional. Set `transcription.device: cuda` and `compute_type: float16` if you have an NVIDIA card with CUDA
 and cuDNN installed.
@@ -34,6 +36,8 @@ sudo dnf install -y --allowerasing ffmpeg
 ffmpeg -hide_banner -filters | grep -E " (ass|zoompan|loudnorm) "   # all three must appear
 
 sudo dnf install -y python3 python3-pip python3-devel gcc dejavu-sans-fonts fontconfig
+sudo dnf install -y tesseract espeak-ng          # optional but recommended (OCR + fallback voice)
+pip install pytesseract                          # python binding for the OCR backend
 
 cd ContentForge-AI
 python3 -m venv .venv && source .venv/bin/activate
@@ -47,7 +51,8 @@ contentforge doctor
 ### Debian / Ubuntu
 
 ```bash
-sudo apt install -y ffmpeg python3-venv python3-dev build-essential fonts-dejavu-core
+sudo apt install -y ffmpeg python3-venv python3-dev build-essential fonts-dejavu-core \
+                    tesseract-ocr espeak-ng      # last two optional (OCR + fallback voice)
 # then the same venv steps as above
 ```
 

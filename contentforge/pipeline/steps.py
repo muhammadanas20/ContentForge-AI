@@ -656,6 +656,12 @@ class PackageStep(Step):
                 "transcript_srt",
                 "transcript_json",
                 "narration",
+                # v0.3 (absent in classic runs -> silently skipped)
+                "grounded_json",
+                "quality_json",
+                "quality_md",
+                "edit_plan_json",
+                "overlay_json",
             )
         }
         out_dir = UploadPackager(s.paths.output).build(
@@ -675,6 +681,9 @@ class PackageStep(Step):
                 "sync": ctx.data.get("sync"),
                 "crop": ctx.data.get("crop"),
                 "captions": ctx.data.get("caption_count"),
+                "understanding": ctx.data.get("understanding"),
+                "quality": (ctx.data.get("quality") or {}).get("summary"),
+                "cover": (ctx.data.get("cover") or {}).get("concept"),
                 "settings": {
                     "tts": s.tts.engine,
                     "subtitle_style": s.subtitles.style,

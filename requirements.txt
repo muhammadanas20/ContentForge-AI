@@ -15,8 +15,14 @@ requests>=2.31
 # Text-to-speech backends (install the ones you use)
 piper-tts>=1.2
 edge-tts>=6.1
+espeakng-loader>=0.2   # bundled libespeak-ng: the always-available offline fallback
 # kokoro>=0.9          # optional, heavy (torch). See docs/installation.md
 # soundfile>=0.12      # required by kokoro
+
+# OCR for the video-understanding stage (optional).
+# Needs the `tesseract` binary too; without it ContentForge uses a built-in
+# OpenCV text-region detector (boxes only, no strings) and keeps working.
+# pytesseract>=0.3.10
 
 # Dashboard
 streamlit>=1.30

@@ -516,3 +516,121 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 def _clamp01(v: float) -> float:
     return _clamp(v, 0.0, 1.0)
+
+
+# --------------------------------------------------------------------------- clicks (v0.3)
+def detect_click_events(
+    understanding,
+    dt: float = 0.25,
+    *,
+    min_area: float = 0.0025,
+    max_area: float = 0.12,
+    max_cursor_speed: float = 0.5,
+    max_settle_speed: float = 0.15,
+    min_width: float = 0.06,
+    debounce: float = 0.6,
+) -> list:
+    """Infer mouse clicks from the visual signal alone.
+
+    A click in a screen recording is a *small, local* change (button press
+    state, focus ring, dropdown) that appears **where the pointer is resting**.
+    Three filters keep this honest:
+
+    * ``min_area`` / shape: the pointer's own motion trail is a *narrow, tall*
+      sliver (the arrow swept along its path); UI feedback is a *wide* box
+      (a button, a field, a menu), so a candidate must be wide or clearly
+      wider than it is tall;
+    * ``max_area`` rejects page loads, scrolls and navigations;
+    * ``max_cursor_speed`` / ``max_settle_speed`` require the pointer to be
+      settling on the target - people do not click mid-flight.
+
+    Without a tracked cursor the function returns an empty list instead of
+    guessing.  Typed loosely to avoid a circular import with
+    :mod:`contentforge.processing.video_understanding`.
+    """
+    from contentforge.models.schemas import ActionEvent  # local import: avoids cycle
+
+    frames = getattr(understanding, "frames", [])
+    events: list[ActionEvent] = []
+    if not frames:
+        return events
+    motions = [f.motion for f in frames if f.motion > 0]
+    baseline = float(np.median(motions)) if motions else 0.0
+    floor = max(0.05, baseline * 0.08)
+    speeds = _smoothed_cursor_speeds(frames)
+    last_click = -10.0
+    for i, f in enumerate(frames):
+        c = f.cursor
+        change = f.change
+        if c is None or change is None:
+            continue
+        if not (min_area <= change.area <= max_area):
+            continue
+        if change.w < min_width and change.w < 2.2 * change.h:
+            continue  # narrow sliver -> the pointer's own trail, not a button
+        if f.motion < floor:
+            continue
+        if speeds[i] > max_cursor_speed:
+            continue
+        settle = speeds[i + 1] if i + 1 < len(speeds) else 0.0
+        if settle > max_settle_speed:
+            continue
+        if not change.expanded(0.04).contains_point(c.x, c.y):
+            continue
+        if f.t - last_click < debounce:
+            continue
+        last_click = f.t
+        label = ""
+        get_text = getattr(understanding, "text_at_region", None)
+        if callable(get_text):
+            label = get_text(change.expanded(0.02), f.t)
+        events.append(
+            ActionEvent(
+                start=max(0.0, f.t - dt),
+                end=f.t + dt,
+                kind="click",
+                region=change.expanded(0.02).clamped(),
+                label=label,
+                confidence=min(1.0, 0.5 + min(0.4, change.area * 8)),
+            )
+        )
+    return events
+
+
+def _smoothed_cursor_speeds(frames) -> list[float]:
+    """Per-frame cursor speed (frame widths / s) from median-filtered positions.
+
+    The blob tracker occasionally latches onto a UI change instead of the
+    pointer; a 3-sample median filter removes those single-frame jumps so a
+    genuine click is not mistaken for a fast pointer movement.
+    """
+    pts = [(f.t, f.cursor.x if f.cursor else None, f.cursor.y if f.cursor else None) for f in frames]
+    xs = [p[1] for p in pts]
+    ys = [p[2] for p in pts]
+
+    def med(seq, i):
+        window = [v for v in seq[max(0, i - 1) : i + 2] if v is not None]
+        return float(np.median(window)) if window else None
+
+    speeds: list[float] = []
+    for i in range(len(pts)):
+        x, y = med(xs, i), med(ys, i)
+        if i == 0 or x is None or y is None:
+            speeds.append(0.0)
+            continue
+        px, py = med(xs, i - 1), med(ys, i - 1)
+        if px is None or py is None:
+            speeds.append(0.0)
+            continue
+        dt_ = max(1e-3, pts[i][0] - pts[i - 1][0])
+        speeds.append(((x - px) ** 2 + (y - py) ** 2) ** 0.5 / dt_)
+    return speeds
+
+
+def cursor_speed(track: CursorTrack) -> list[float]:
+    """Per-sample cursor speed in frame widths / second (0 for the first sample)."""
+    out = [0.0]
+    for a, b in zip(track.samples, track.samples[1:]):
+        dt = max(1e-3, b.t - a.t)
+        out.append(((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5 / dt)
+    return out

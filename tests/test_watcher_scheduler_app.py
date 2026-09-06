@@ -105,6 +105,7 @@ def test_app_process_file_dedupe_and_retry(settings, ffmpeg, sample_video, monke
         "ultrafast",
         30,
     )
+    s.pipeline.mode = "classic"  # this test asserts the v0.2 step order
     s.pipeline.retries = 0
     s.pipeline.steps.archive = False
     s.pipeline.cleanup_work_on_success = False

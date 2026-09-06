@@ -32,6 +32,7 @@ def fast_settings(settings):
     """Settings tuned for fast test renders (small frame, ultrafast, no retries)."""
     settings.video.width, settings.video.height, settings.video.fps = 540, 960, 24
     settings.video.preset, settings.video.crf = "ultrafast", 30
+    settings.pipeline.mode = "classic"  # v0.2 path; the smart pipeline has its own tests
     settings.pipeline.retries = 0
     settings.pipeline.retry_backoff_seconds = 0
     settings.audio.silence.threshold_db = -30
@@ -102,3 +103,34 @@ def fake_transcript():
         words=words[9:],
     )
     return Transcript(language="en", duration=t, segments=[seg1, seg2])
+
+
+@pytest.fixture(scope="session")
+def tutorial_recording(tmp_path_factory):
+    """A short synthetic 'student offers' screen recording with known ground truth.
+
+    Rendered once per test session (~3 s) and shared by every v0.3 test so the
+    understanding/framing/editing assertions all run against the same material.
+    """
+    if not ffmpeg_available():
+        pytest.skip("ffmpeg not available")
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from screen_recording import make_tutorial_recording
+
+    out = tmp_path_factory.mktemp("tutorial") / "tutorial.mp4"
+    return make_tutorial_recording(out, width=960, height=540, fps=20, duration=12.0)
+
+
+@pytest.fixture(scope="session")
+def understanding(tutorial_recording):
+    """``understand_video`` on the shared recording (analysed once per session)."""
+    from contentforge.processing.video_understanding import understand_video
+
+    return understand_video(
+        tutorial_recording.path,
+        sample_fps=6,
+        ocr_every_seconds=1.0,
+        website="studentofferco.com",
+    )
