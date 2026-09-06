@@ -7,7 +7,7 @@ invalid values are caught at start-up instead of deep inside a render.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -82,6 +82,12 @@ class PipelineConfig(_Model):
     retries: int = Field(2, ge=0, le=10)
     retry_backoff_seconds: float = 5
     cleanup_work_on_success: bool = True
+    # Low-disk design: delete big intermediates as soon as a later step supersedes
+    # them (cut.mp4 after the final render, ...) instead of at the very end.
+    delete_intermediates_early: bool = True
+    # Refuse to *start* a job when the data disk has less free space than this
+    # (in addition to cleanup.min_free_disk_gb, which triggers cleanup). 0 = off.
+    min_free_disk_gb_to_start: float = Field(1.0, ge=0)
     steps: PipelineSteps = Field(default_factory=PipelineSteps)
 
 
@@ -164,10 +170,28 @@ class TTSConfig(_Model):
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
 
 
+class CursorFollowConfig(_Model):
+    """Cursor-aware moving crop (see ``contentforge/processing/cursor.py``)."""
+
+    enabled: bool = True
+    sample_fps: float = Field(10, ge=1, le=60)  # cursor tracker sampling rate
+    work_width: int = Field(960, ge=320, le=3840)  # analysis resolution (speed vs precision)
+    min_size_px: int = Field(8, ge=2, le=200)  # cursor bounding box limits at source scale
+    max_size_px: int = Field(64, ge=4, le=400)
+    deadzone: float = Field(0.3, ge=0, le=0.9)  # window fraction where cursor may roam freely
+    smoothing: float = Field(0.8, ge=0, le=0.99)  # exponential smoothing per sample
+    max_speed: float = Field(1.5, ge=0.05, le=20)  # max pan speed, frame widths / second
+    min_detections: int = Field(8, ge=1)  # below this -> fallback to static crop
+    min_coverage: float = Field(0.15, ge=0, le=1)  # detections / samples below -> fallback
+    keyframe_tolerance: float = Field(0.004, ge=0, le=0.1)  # path simplification (frame widths)
+    snap_gap_seconds: float = Field(1.0, ge=0)  # cut removing >= this -> re-centre instead of pan
+
+
 class CropConfig(_Model):
     mode: Literal["smart", "center", "left", "right", "blur-pad"] = "smart"
     sample_fps: float = 2
     smoothing: float = Field(0.85, ge=0, le=1)
+    follow_cursor: CursorFollowConfig = CursorFollowConfig()
 
 
 class ZoomConfig(_Model):
@@ -210,6 +234,8 @@ class BrandingConfig(_Model):
     logo_width: int = 180
     intro_title: bool = True
     outro_cta: bool = True
+    intro_seconds: float = Field(2.2, ge=0.5, le=10)  # hook card duration
+    outro_seconds: float = Field(2.5, ge=0.5, le=10)  # CTA card duration
     primary_color: str = "#FF7A00"
     secondary_color: str = "#FFFFFF"
     background_color: str = "#0F0F14"
@@ -232,8 +258,17 @@ class VideoConfig(_Model):
     branding: BrandingConfig = Field(default_factory=BrandingConfig)
 
 
+class WordLevelConfig(_Model):
+    """Word-level narration alignment (Faster-Whisper on the TTS audio)."""
+
+    enabled: bool = True
+    min_match_ratio: float = Field(0.6, ge=0, le=1)  # below -> sentence-level fallback
+    min_word_seconds: float = Field(0.06, ge=0.01, le=1)  # shortest highlighted word
+
+
 class SubtitleConfig(_Model):
     enabled: bool = True
+    word_level: WordLevelConfig = WordLevelConfig()
     style: Literal["bold-pop", "clean", "karaoke", "minimal"] = "bold-pop"
     font: str = "DejaVu Sans"
     font_size: int = 68
@@ -336,6 +371,10 @@ class DashboardConfig(_Model):
 class Settings(_Model):
     """Root settings object."""
 
+    # Active preset name (key of ``presets``) - resolved by the loader, kept for reporting.
+    preset: str = "student_reel"
+    # Named partial overrides (deep-merged on top of the base config by the loader).
+    presets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)

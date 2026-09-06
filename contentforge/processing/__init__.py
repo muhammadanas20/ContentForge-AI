@@ -2,6 +2,7 @@
 
 from contentforge.processing.analysis import FrameAnalysis, analyse_video
 from contentforge.processing.audio_mixer import AudioMixer
+from contentforge.processing.cursor import CursorTrack, CursorTracker, detect_cursor_track
 from contentforge.processing.segments import (
     Timeline,
     build_keep_ranges,
@@ -14,6 +15,7 @@ from contentforge.processing.video_editor import (
     VideoEditor,
     ZoomPulse,
     plan_crop,
+    plan_cursor_crop,
     plan_zoom_pulses,
     zoom_expression,
 )
@@ -21,15 +23,19 @@ from contentforge.processing.video_editor import (
 __all__ = [
     "AudioMixer",
     "CropPlan",
+    "CursorTrack",
+    "CursorTracker",
     "FrameAnalysis",
     "Timeline",
     "VideoEditor",
     "ZoomPulse",
     "analyse_video",
     "build_keep_ranges",
+    "detect_cursor_track",
     "invert_intervals",
     "merge_intervals",
     "plan_crop",
+    "plan_cursor_crop",
     "plan_zoom_pulses",
     "shrink_silences",
     "zoom_expression",

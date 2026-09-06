@@ -13,11 +13,19 @@ each step resumable:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from contentforge.config.schema import VideoConfig
+from contentforge.config.schema import CursorFollowConfig, VideoConfig
 from contentforge.log import get_logger
+from contentforge.processing.cursor import (
+    CursorTrack,
+    Keyframe,
+    evaluate_keyframes,
+    follow_path,
+    piecewise_linear_expression,
+    simplify_keyframes,
+)
 from contentforge.processing.segments import Interval
 from contentforge.utils.ffmpeg import FFmpeg, MediaInfo
 
@@ -26,17 +34,50 @@ log = get_logger("video")
 
 @dataclass
 class CropPlan:
-    """Crop rectangle in source pixels producing a 9:16 region."""
+    """Crop rectangle in source pixels producing a 9:16 region.
+
+    ``x``/``y`` are the static position.  When ``x_keyframes`` is set the crop
+    window pans horizontally: each inner list holds ``(output_time, x_px)``
+    keyframes of one kept segment; values are interpolated linearly inside a
+    segment and held across cuts.  The window never leaves the frame - the
+    planner clamps every keyframe and the expression is clamped again for
+    safety.
+    """
 
     x: int
     y: int
     w: int
     h: int
     mode: str
+    x_keyframes: list[list[Keyframe]] = field(default_factory=list)
+    src_width: int = 0
+
+    @property
+    def dynamic(self) -> bool:
+        return bool(self.x_keyframes) and any(len(seg) for seg in self.x_keyframes)
+
+    def x_at(self, t: float) -> float:
+        """Crop left edge (px) at output time ``t``."""
+        if not self.dynamic:
+            return float(self.x)
+        return evaluate_keyframes(self.x_keyframes, t)
 
     @property
     def ffmpeg(self) -> str:
-        return f"crop={self.w}:{self.h}:{self.x}:{self.y}"
+        if not self.dynamic:
+            return f"crop={self.w}:{self.h}:{self.x}:{self.y}"
+        max_x = max(0, (self.src_width or (self.x + self.w)) - self.w)
+        expr = piecewise_linear_expression(self.x_keyframes, var="t", precision=2)
+        return f"crop={self.w}:{self.h}:x='clip({expr},0,{max_x})':y={self.y}"
+
+    def to_dict(self) -> dict:
+        d = {"x": self.x, "y": self.y, "w": self.w, "h": self.h, "mode": self.mode}
+        if self.dynamic:
+            d["dynamic"] = True
+            d["keyframes"] = sum(len(seg) for seg in self.x_keyframes)
+            xs = [v for seg in self.x_keyframes for _, v in seg]
+            d["x_min"], d["x_max"] = int(min(xs)), int(max(xs))
+        return d
 
 
 @dataclass
@@ -81,7 +122,97 @@ def plan_crop(
     x = int(round(cx * sw - w / 2))
     x = max(0, min(sw - w, x))
     y = max(0, (sh - h) // 2)
-    return CropPlan(x=x, y=y, w=w, h=h, mode=mode)
+    return CropPlan(x=x, y=y, w=w, h=h, mode=mode, src_width=sw)
+
+
+def plan_cursor_crop(
+    base: CropPlan,
+    track: CursorTrack,
+    keep: list[Interval],
+    cfg: CursorFollowConfig,
+) -> CropPlan:
+    """Turn a cursor track (source time) into a panning crop plan (output time).
+
+    Returns ``base`` unchanged (static crop) when the track is not reliable,
+    when the source is not wider than the crop, or when the cursor never
+    leaves the static window - so the fallback is always the proven static path.
+    """
+    if not track.is_reliable(cfg.min_detections, cfg.min_coverage):
+        log.info(
+            "Cursor follow: track unreliable (%d detections, %.0f%% coverage) -> static crop",
+            track.detections,
+            track.coverage * 100,
+        )
+        return base
+    sw = base.src_width or track.width
+    if sw <= base.w or not track.samples:
+        return base
+    window = base.w / sw
+    times, xs, _ys = track.positions()
+    segments: list[list[Keyframe]] = []
+    offset = 0.0
+    left: float | None = None  # first segment starts centred on the cursor (no opening pan)
+    all_left: list[float] = []
+    prev_end: float | None = None
+    for s, e in keep:
+        if prev_end is not None and s - prev_end >= cfg.snap_gap_seconds:
+            left = None  # long cut: content changes anyway, re-centre on the cursor
+        prev_end = e
+        seg_t = [t for t in times if s <= t < e]
+        seg_x = [x for t, x in zip(times, xs) if s <= t < e]
+        seg_len = e - s
+        if not seg_t:
+            # nothing sampled inside this segment: hold the current position
+            hold = base.x / sw if left is None else left
+            segments.append([(offset, hold * sw), (offset + seg_len, hold * sw)])
+            offset += seg_len
+            continue
+        # anchor the start of the segment so the expression covers [offset, offset+len)
+        if seg_t[0] > s:
+            seg_t.insert(0, s)
+            seg_x.insert(0, seg_x[0])
+        path = follow_path(
+            seg_t,
+            seg_x,
+            window=window,
+            deadzone=cfg.deadzone,
+            smoothing=cfg.smoothing,
+            max_speed=cfg.max_speed,
+            start=left,
+        )
+        left = path[-1]
+        pts: list[Keyframe] = [(offset + (t - s), p * sw) for t, p in zip(seg_t, path)]
+        pts.append((offset + seg_len, left * sw))
+        pts = simplify_keyframes(pts, cfg.keyframe_tolerance * sw)
+        segments.append(pts)
+        all_left.extend(path)
+        offset += seg_len
+    if not all_left:
+        return base
+    max_x = sw - base.w
+    if max(all_left) * sw - min(all_left) * sw < 1.0:
+        # never moves - keep static crop at the followed position
+        x = int(round(min(max_x, max(0.0, all_left[0] * sw))))
+        return CropPlan(x=x, y=base.y, w=base.w, h=base.h, mode=base.mode, src_width=sw)
+    clamped = [[(round(t, 3), float(max(0.0, min(max_x, v)))) for t, v in seg] for seg in segments]
+    first_x = int(round(clamped[0][0][1]))
+    plan = CropPlan(
+        x=first_x,
+        y=base.y,
+        w=base.w,
+        h=base.h,
+        mode="cursor",
+        x_keyframes=clamped,
+        src_width=sw,
+    )
+    log.info(
+        "Cursor follow: %d keyframes over %d segments, x range %d..%d px",
+        sum(len(seg) for seg in clamped),
+        len(clamped),
+        int(min(v for seg in clamped for _, v in seg)),
+        int(max(v for seg in clamped for _, v in seg)),
+    )
+    return plan
 
 
 def plan_zoom_pulses(

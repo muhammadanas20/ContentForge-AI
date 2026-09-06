@@ -2,7 +2,7 @@
 
 Legend: ✅ done · 🔄 in progress · ⏳ planned
 
-## v0.1.0 - Foundation (current)
+## v0.1.0 - Foundation
 
 | Area | Status | Notes |
 |---|---|---|
@@ -30,10 +30,27 @@ Legend: ✅ done · 🔄 in progress · ⏳ planned
 | Documentation set | ✅ | `docs/` |
 | Test suite (78 tests incl. real renders + E2E) | ✅ | |
 
-## v0.2 - Quality of output
+## v0.2.0 - Screen recording quality (current)
 
-- ⏳ Cursor-aware crop: detect the mouse pointer (template match) and weight the crop centre toward it.
-- ⏳ Word-level Whisper alignment of the **narration** (run Whisper on the TTS output) for exact karaoke timing instead of even distribution.
+| Area | Status | Notes |
+|---|---|---|
+| Cursor detection + tracking (`processing/cursor.py`), one decode pass shared with motion analysis | ✅ | frame-diff blob detector with online template, scroll/page-load rejection |
+| Dynamic 9:16 crop following the cursor (dead-zone, EMA smoothing, max pan speed, clamped, re-centre on long cuts) | ✅ | FFmpeg `crop` with piecewise-linear `x(t)` in output time; static smart-crop fallback |
+| Word-level narration alignment (Whisper on TTS WAV → script alignment → captions/karaoke) | ✅ | `ai/alignment.py`; sentence-level fallback; **real-model verification pending on Fedora** |
+| `student_reel` / `fast_preview` presets, `--preset`, `CONTENTFORGE_PRESET`, configurable intro/outro seconds | ✅ | |
+| Low-disk design: free-space floor to start, early intermediate deletion, verified-package cleanup | ✅ | |
+| Fedora real-system test guide | ✅ | `docs/fedora-real-system-test.md` |
+| Synthetic realistic screen-recording generator + ground-truth cursor tests | ✅ | `tests/screen_recording.py` |
+| Test suite | ✅ | 92 tests |
+
+Known limitations (honest): the cursor detector is verified on a synthetic GNOME-like recording, not yet on real
+OBS/GNOME footage; pointer shapes with very low contrast (thin I-beam on white) may be missed → static crop. Word
+alignment is exercised with a realistic ASR stub only - real Whisper/Piper could not be downloaded in the build sandbox.
+
+## v0.2.x - Follow-ups
+
+- ⏳ Verify cursor tracking + word alignment on real GNOME/OBS recordings with real Whisper/Piper (see Fedora guide) and tune thresholds.
+- ⏳ Vertical cursor follow (y) for tall pages when the source is 4:3 / portrait.
 - ⏳ Optional B-roll cards: auto-insert a title card per script step when the screen is static for long.
 - ⏳ Background music library with auto-ducking under speech (sidechain compress).
 - ⏳ Additional subtitle presets (Hormozi-style boxed words, two-tone) and font packaging.
@@ -55,6 +72,7 @@ Legend: ✅ done · 🔄 in progress · ⏳ planned
 
 ## Next recommended task
 
-**Cursor-aware smart crop (v0.2)** - highest visible quality gain for screen recordings: track the pointer with a
-small template/colour detector in `processing/analysis.py`, blend its position into `centers_x`, and add a
-`video.crop.follow_cursor` switch with tests using a synthetic moving-dot video.
+**Real-world validation run (v0.2.x)** - process 3–5 real GNOME/OBS StudentTools recordings on the Fedora laptop
+following `docs/fedora-real-system-test.md`; record `cursor_coverage`, `word_alignment` ratios and visual notes in an
+issue, then tune `follow_cursor.*` / `word_level.min_match_ratio` defaults from the evidence. After that:
+background-music auto-ducking (sidechain) is the next visible quality gain.

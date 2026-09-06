@@ -7,10 +7,13 @@ All configuration is in `config/config.yaml`. It is validated by the Pydantic mo
 
 1. Built-in defaults (schema).
 2. `config/config.yaml`.
-3. `config/config.local.yaml` - optional, git-ignored, deep-merged. Ideal for machine-specific tweaks.
-4. Environment variables `CONTENTFORGE__SECTION__KEY=value` (double underscore = nesting, values YAML-coerced).
+3. The active **preset** (`preset: student_reel` → `presets.student_reel`, a named partial config deep-merged on top).
+   Select with `preset:` in YAML, `CONTENTFORGE_PRESET=<name>` or `contentforge --preset <name>`; `none` disables.
+   Unknown names are a hard error. Shipped presets: `student_reel` (production look), `fast_preview` (720p, fast, tiny Whisper).
+4. `config/config.local.yaml` - optional, git-ignored, deep-merged. Ideal for machine-specific tweaks (may also define presets).
+5. Environment variables `CONTENTFORGE__SECTION__KEY=value` (double underscore = nesting, values YAML-coerced).
    Example: `CONTENTFORGE__TTS__ENGINE=edge`, `CONTENTFORGE__VIDEO__CRF=18`, `CONTENTFORGE__WATCHER__ENABLED=false`.
-5. `CONTENTFORGE_CONFIG=/path/to/other.yaml` selects a different file; `CONTENTFORGE_DATA_DIR=/mnt/media` relocates every
+6. `CONTENTFORGE_CONFIG=/path/to/other.yaml` selects a different file; `CONTENTFORGE_DATA_DIR=/mnt/media` relocates every
    `data/...` path at once.
 
 Inspect the effective result: `contentforge config` or `contentforge config video`.
@@ -48,7 +51,8 @@ Never put keys into YAML. Copy `.env.example` to `.env`:
 
 ### `pipeline`
 `max_workers` (parallel videos; 1 recommended on laptops), `retries` (per step), `retry_backoff_seconds`,
-`cleanup_work_on_success`, and `steps.*` boolean switches: `transcribe, script, narration, subtitles, silence_removal,
+`cleanup_work_on_success`, `delete_intermediates_early` (drop `cut.mp4`/`synced.mp4` as soon as they are superseded),
+`min_free_disk_gb_to_start` (refuse to start a job below this much free space; 0 = off), and `steps.*` boolean switches: `transcribe, script, narration, subtitles, silence_removal,
 jump_cuts, vertical_crop, auto_zoom, progress_bar, branding, thumbnail, social, analytics, package, archive`.
 
 ### `audio`
@@ -76,17 +80,29 @@ If the configured engine is unavailable the next available one is used; if none 
 ### `video`
 * Output: `width` 1080, `height` 1920, `fps` 30, `crf` 20, `preset` medium, `pix_fmt`, `audio_bitrate`, `max_duration_seconds` 90.
 * `crop.mode`: `smart` (follow on-screen activity), `center`, `left`, `right`; `sample_fps`, `smoothing`.
+* `crop.follow_cursor` (only with `smart`): `enabled`, `sample_fps` 10 (tracker rate), `work_width` 960 (analysis
+  resolution), `min_size_px`/`max_size_px` (cursor bounding box at source scale), `deadzone` 0.3 (fraction of the window
+  in which the pointer may move without panning), `smoothing` 0.8 (0 = instant … 0.95 = very lazy), `max_speed` 1.5
+  (frame-widths per second), `min_detections` 8 and `min_coverage` 0.15 (below either → static smart crop),
+  `keyframe_tolerance`, `snap_gap_seconds` 1.0 (a cut removing ≥ this re-centres instead of panning).
+  Reported in `manifest.json` → `crop.mode: cursor|smart`, `dynamic`, `x_min/x_max`.
 * `zoom`: `enabled`, `max_zoom` 1.12, `interval_seconds` 6, `duration_seconds` 2.5, `ease`. With narration, pulses align to sentence starts.
 * `jump_cuts`: `enabled`, `min_gap_seconds` 1.2, `motion_threshold` 2.0 (mean pixel change per sample; lower = stricter).
 * `transitions`: `enabled`, `type` fade|none, `duration` 0.08.
 * `progress_bar`: `enabled`, `height`, `color`, `background` (8-digit hex = alpha), `position` top|bottom.
 * `branding`: `watermark_text`, `watermark_position`, `watermark_opacity`, `font_size`, `logo_path` (PNG in `data/assets`),
-  `logo_width`, `intro_title` (hook card), `outro_cta` (CTA card), `primary_color`, `secondary_color`, `background_color`.
+  `logo_width`, `intro_title` (hook card), `outro_cta` (CTA card), `intro_seconds` 2.2, `outro_seconds` 2.5,
+  `primary_color`, `secondary_color`, `background_color`.
 
 ### `subtitles`
 `enabled`, `style` (`bold-pop|clean|karaoke|minimal`), `font` (fontconfig family name), `font_size`, `max_chars_per_line`,
 `max_words_per_caption`, `position_v` (0 top … 1 bottom), `primary_color`, `highlight_color`, `outline_color`,
 `outline_width`, `shadow`, `highlight_keywords`, `uppercase`, `formats` (`srt ass json txt`).
+
+`word_level` - Whisper is run on the **narration WAV** (`word_timestamps=True`) and the script words are aligned to it
+so every caption word appears when it is actually spoken (all four styles benefit; `karaoke` sweeps per word).
+`enabled`, `min_match_ratio` 0.6 (fewer script words matched → sentence-level fallback), `min_word_seconds` 0.06.
+The step output shows `word_alignment: 91%` / `fallback-sentence` / `disabled`.
 
 ### `thumbnail`
 `enabled`, `width`, `height`, `frame_position` (fraction of video used as background), `overlay_title`, `font` (TTF path),

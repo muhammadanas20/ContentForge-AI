@@ -32,11 +32,24 @@ Fixtures (`conftest.py`): `settings` (config anchored in a temp data dir), `ffmp
 Whisper and TTS models are never downloaded in tests - `FakeTranscriber` / `FakeTTS` in `test_pipeline.py` stand in.
 To exercise the real engines manually: `contentforge process data/input/<file>.mp4 --log-level DEBUG`.
 
+## What the suite proves - and what it does not
+
+| Level | Covered by | Notes |
+|---|---|---|
+| Unit | `test_cursor_crop.py` (follow_path, keyframes, expression, planner bounds/fallbacks), `test_alignment.py` (normalisation, alignment, rejection), `test_config.py` (presets) | pure python, < 5 s |
+| Integration (real FFmpeg/OpenCV) | `test_cursor_crop.py::test_detect_cursor_track_on_generated_recording`, `::test_cursor_crop_render_keeps_cursor_visible` - a synthetic but realistic tutorial recording (`tests/screen_recording.py`: page, sidebar, arrow cursor, clicks, blinking caret, scroll) is tracked against ground truth (median error < 20 px), rendered with the panning crop and compared frame-by-frame with the source | |
+| End-to-end pipeline | `test_pipeline.py`, `test_alignment.py::test_pipeline_word_level_captions_and_fallback`, `test_cursor_crop.py::test_pipeline_uses_cursor_crop_and_falls_back` | Whisper and TTS are **stubbed** (`FakeTranscriber`, `AligningTranscriber`, `FakeTTS`) |
+| Real models | **not** in CI - follow `docs/fedora-real-system-test.md` | Whisper accuracy, Piper voice and true word timing can only be judged on a real machine |
+
+Never claim a model-dependent feature works from the stubbed tests alone.
+
 ## Writing a test for a new step
 
 ```python
 def test_my_step(fast_settings, ffmpeg, sample_video, patched):
-    runner = PipelineRunner(fast_settings, Database(fast_settings.paths.db), ffmpeg, steps=[ProbeStep, MyStep])
+    runner = PipelineRunner(
+        fast_settings, Database(fast_settings.paths.db), ffmpeg, steps=[ProbeStep, MyStep]
+    )
     ctx = runner.create_job(sample_video)
     assert runner.run(ctx).status == "completed"
 ```

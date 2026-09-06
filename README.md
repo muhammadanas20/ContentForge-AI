@@ -28,11 +28,12 @@ data/output/smallpdfcom-convert-pdf-a1b2c3/
 | **Zero-touch** | Watchdog folder watcher, resumable pipeline, automatic retries, crash recovery |
 | **Speech → script** | Faster-Whisper (TXT/SRT/JSON) → grounded short-form script (hook, steps, CTA). Never invents features. Optional LLM polish (OpenAI / Ollama) with a hallucination guard |
 | **AI voice** | Piper (offline), Kokoro, Edge TTS - switch with one YAML line; graceful fallback to original audio |
-| **Editing** | Silence removal, motion-based jump cuts, smart 9:16 crop that follows on-screen activity, eased zoom pulses, micro fade transitions, EBU R128 loudness |
-| **Captions** | 4 subtitle styles (bold-pop, clean, karaoke, minimal), keyword highlighting, animated progress bar, watermark, hook & CTA cards - all burned in one libass pass |
+| **Editing** | Silence removal, motion-based jump cuts, **cursor-aware 9:16 crop** (tracks the mouse pointer and pans smoothly, static smart-crop fallback), eased zoom pulses, micro fade transitions, EBU R128 loudness |
+| **Captions** | 4 subtitle styles (bold-pop, clean, karaoke, minimal) with **word-level timing** (Whisper-aligned narration, sentence-level fallback), keyword highlighting, animated progress bar, watermark, hook & CTA cards - all burned in one libass pass |
 | **Publishing kit** | Thumbnail + Canva brief, Instagram caption, rotating category-balanced hashtags, CTA & comment prompt, SEO description, YouTube title |
-| **Ops** | SQLite/PostgreSQL job store, Streamlit dashboard (queue, errors, logs, analytics, storage, health), APScheduler jobs, safe cleanup with disk-space floor, dated Rich logs |
-| **Quality** | 78 pytest tests incl. real FFmpeg renders and end-to-end pipeline runs, typed Pydantic config, `.env` for secrets |
+| **Ops** | SQLite/PostgreSQL job store, Streamlit dashboard (queue, errors, logs, analytics, storage, health), APScheduler jobs, low-disk design (early intermediate deletion, verified-package cleanup, free-space floor), dated Rich logs |
+| **Presets** | `student_reel` (production look) and `fast_preview`; `contentforge --preset <name>` or `CONTENTFORGE_PRESET` |
+| **Quality** | 92 pytest tests incl. real FFmpeg renders, a synthetic tutorial recording with ground-truth cursor path, and end-to-end pipeline runs; typed Pydantic config, `.env` for secrets |
 
 ## Quick start (Fedora)
 
@@ -93,7 +94,8 @@ See [docs/configuration.md](docs/configuration.md) for every key.
 | [docs/analytics.md](docs/analytics.md) | Metrics, scoring, suggestions, CSV import |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common errors, FAQ |
 | [docs/maintenance.md](docs/maintenance.md) | Updating, backup, restore, cleanup policy |
-| [docs/testing.md](docs/testing.md) | Running and writing tests |
+| [docs/testing.md](docs/testing.md) | Running and writing tests; what is unit / integration / real-model tested |
+| [docs/fedora-real-system-test.md](docs/fedora-real-system-test.md) | Exact Fedora commands: deps, Whisper/Piper download, TTS + alignment checks, first video, low-disk config, cleanup |
 | [ROADMAP.md](ROADMAP.md) | Status and next tasks |
 
 ## Project layout
@@ -126,7 +128,7 @@ tests/          pytest suite
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                # 78 tests, ~30 s with ffmpeg
+pytest                # 92 tests, ~75 s with ffmpeg
 pytest -m "not ffmpeg"   # pure-python subset
 ```
 

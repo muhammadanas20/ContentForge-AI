@@ -11,11 +11,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from contentforge.log import get_logger
+
+if TYPE_CHECKING:  # pragma: no cover
+    from contentforge.processing.cursor import CursorTrack, CursorTracker
 
 log = get_logger("analysis")
 
@@ -30,6 +34,7 @@ class FrameAnalysis:
     width: int = 0
     height: int = 0
     duration: float = 0.0
+    cursor: CursorTrack | None = None  # filled when a CursorTracker is supplied
 
     def low_motion_intervals(
         self, threshold: float, min_duration: float
@@ -65,12 +70,19 @@ class FrameAnalysis:
 
 
 def analyse_video(
-    path: str | Path, sample_fps: float = 2.0, downscale_width: int = 320
+    path: str | Path,
+    sample_fps: float = 2.0,
+    downscale_width: int = 320,
+    *,
+    cursor_tracker: CursorTracker | None = None,
+    cursor_sample_fps: float = 10.0,
 ) -> FrameAnalysis:
     """Sample frames and compute motion + activity centroid.
 
     Frames are downscaled for speed; a 60 s clip at 2 fps takes well under a
-    second on a laptop CPU.
+    second on a laptop CPU.  When ``cursor_tracker`` is given the *same* decode
+    pass also feeds frames to the tracker at ``cursor_sample_fps`` (one pass
+    over the file instead of two - matters on slow laptops).
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -81,6 +93,7 @@ def analyse_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     duration = total / fps if fps else 0.0
     step = max(1, int(round(fps / max(0.1, sample_fps))))
+    cstep = max(1, int(round(fps / max(0.5, cursor_sample_fps))))
     scale = downscale_width / max(1, width)
     small_size = (downscale_width, max(1, int(height * scale)))
 
@@ -92,10 +105,15 @@ def analyse_video(
         ok = cap.grab()
         if not ok:
             break
-        if idx % step == 0:
+        want_motion = idx % step == 0
+        want_cursor = cursor_tracker is not None and idx % cstep == 0
+        if want_motion or want_cursor:
             ok, frame = cap.retrieve()
             if not ok:
                 break
+            if want_cursor and cursor_tracker is not None:
+                cursor_tracker.update(frame, idx / fps)
+        if want_motion:
             gray = cv2.cvtColor(
                 cv2.resize(frame, small_size, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY
             )
@@ -117,6 +135,10 @@ def analyse_video(
     cap.release()
     if not result.duration and result.times:
         result.duration = result.times[-1]
+    if cursor_tracker is not None:
+        cursor_tracker.track.backfill()
+        cursor_tracker.track.duration = max(cursor_tracker.track.duration, result.duration)
+        result.cursor = cursor_tracker.track
     log.debug(
         "Analysed %d samples: mean motion %.2f, centre %.2f",
         len(result.times),

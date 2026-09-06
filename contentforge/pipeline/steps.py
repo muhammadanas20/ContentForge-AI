@@ -21,7 +21,7 @@ from typing import Any
 
 from contentforge.ai import Script, ScriptWriter, Transcriber, Transcript
 from contentforge.ai.social import SocialWriter
-from contentforge.ai.tts import TTSError, get_tts_engine
+from contentforge.ai.tts import TTSError, TTSResult, get_tts_engine
 from contentforge.archive import Archiver
 from contentforge.config.schema import Settings
 from contentforge.db import Database
@@ -30,16 +30,19 @@ from contentforge.output import UploadPackager
 from contentforge.pipeline.context import JobContext
 from contentforge.processing import (
     AudioMixer,
+    CursorTrack,
+    CursorTracker,
     Timeline,
     VideoEditor,
     analyse_video,
     build_keep_ranges,
     plan_crop,
+    plan_cursor_crop,
     plan_zoom_pulses,
 )
 from contentforge.subtitles import AssRenderer, OverlaySpec, build_captions, write_all
 from contentforge.thumbnails import ThumbnailGenerator
-from contentforge.utils import FFmpeg, atomic_write_json, atomic_write_text, read_json
+from contentforge.utils import FFmpeg, atomic_write_json, atomic_write_text, disk_free_gb, read_json
 
 log = get_logger("steps")
 
@@ -67,6 +70,14 @@ class ProbeStep(Step):
     name = "probe"
 
     def run(self, ctx: JobContext) -> dict[str, Any]:
+        floor = float(self.settings.pipeline.min_free_disk_gb_to_start)
+        if floor > 0:
+            free = disk_free_gb(ctx.work_dir.parent)
+            if free < floor:
+                raise RuntimeError(
+                    f"Only {free:.2f} GB free on the data disk (< {floor:.1f} GB); "
+                    "run 'contentforge cleanup' or free space before processing"
+                )
         info = self.ff.probe(ctx.source)
         if not info.has_video:
             raise ValueError(f"{ctx.source.name} has no video stream")
@@ -174,12 +185,48 @@ class NarrationStep(Step):
             "voice": result.voice,
             "duration": result.duration,
             "sentences": [[s, e, t] for s, e, t in result.sentence_timings],
+            "alignment": None,
         }
-        return {
+        out_info: dict[str, Any] = {
             "engine": result.engine,
             "voice": result.voice,
             "duration": round(result.duration, 2),
+            "word_alignment": "disabled",
         }
+        wl = self.settings.subtitles.word_level
+        if wl.enabled and self.settings.pipeline.steps.subtitles:
+            alignment = self._align_words(ctx, script.narration, result)
+            if alignment is not None:
+                ctx.data["narration"]["alignment"] = alignment.to_dict()
+                out_info["word_alignment"] = f"{alignment.match_ratio:.0%}"
+            else:
+                out_info["word_alignment"] = "fallback-sentence"
+        return out_info
+
+    def _align_words(self, ctx: JobContext, narration_text: str, result: TTSResult):
+        """Whisper word timestamps on the TTS audio -> per-word script timing (None on failure)."""
+        from contentforge.ai.alignment import align_script
+
+        wl = self.settings.subtitles.word_level
+        try:
+            asr_cfg = self.settings.transcription.model_copy(update={"word_timestamps": True})
+            asr = Transcriber(asr_cfg).transcribe(result.path)
+            alignment = align_script(
+                narration_text,
+                asr,
+                duration=result.duration,
+                min_match_ratio=wl.min_match_ratio,
+                min_word_seconds=wl.min_word_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - alignment is best effort by design
+            log.warning("Word-level alignment failed (%s); using sentence timings", exc)
+            self.db.add_event("warning", f"Word alignment unavailable: {exc}", ctx.job_id)
+            return None
+        if alignment is None:
+            self.db.add_event(
+                "warning", "Word alignment rejected (low match); sentence timings", ctx.job_id
+            )
+        return alignment
 
 
 class AnalyseStep(Step):
@@ -202,8 +249,24 @@ class AnalyseStep(Step):
                 min_duration=s.audio.silence.min_duration,
             )
         analysis = None
-        if steps.jump_cuts or (steps.vertical_crop and s.video.crop.mode == "smart"):
-            analysis = analyse_video(ctx.source, sample_fps=s.video.crop.sample_fps)
+        smart = steps.vertical_crop and s.video.crop.mode == "smart"
+        if steps.jump_cuts or smart:
+            tracker = None
+            fc = s.video.crop.follow_cursor
+            if smart and fc.enabled:
+                tracker = CursorTracker(
+                    int(media["width"]),
+                    int(media["height"]),
+                    work_width=fc.work_width,
+                    min_size_px=fc.min_size_px,
+                    max_size_px=fc.max_size_px,
+                )
+            analysis = analyse_video(
+                ctx.source,
+                sample_fps=s.video.crop.sample_fps,
+                cursor_tracker=tracker,
+                cursor_sample_fps=fc.sample_fps,
+            )
         low_motion = None
         if steps.jump_cuts and analysis is not None and s.video.jump_cuts.enabled:
             low_motion = analysis.low_motion_intervals(
@@ -237,6 +300,7 @@ class AnalyseStep(Step):
 
         timeline = Timeline(keep)
         center = analysis.dominant_center(s.video.crop.smoothing) if analysis is not None else 0.5
+        cursor = analysis.cursor if analysis is not None else None
         ctx.data["edit"] = {
             "silences": silences,
             "low_motion": low_motion or [],
@@ -244,6 +308,7 @@ class AnalyseStep(Step):
             "output_duration": timeline.output_duration,
             "removed_seconds": timeline.removed_seconds,
             "crop_center_x": center,
+            "cursor_track": cursor.to_dict() if cursor is not None else None,
         }
         log.info(
             "Edit plan: %d segments, %.1fs -> %.1fs (removed %.1fs), crop centre %.2f",
@@ -257,6 +322,8 @@ class AnalyseStep(Step):
             "segments": len(keep),
             "output_duration": round(timeline.output_duration, 2),
             "removed_seconds": round(timeline.removed_seconds, 2),
+            "cursor_detections": cursor.detections if cursor is not None else 0,
+            "cursor_coverage": round(cursor.coverage, 2) if cursor is not None else 0.0,
         }
 
 
@@ -280,6 +347,10 @@ class RenderCutStep(Step):
         keep = [tuple(k) for k in edit["keep"]]
         mode = s.video.crop.mode if s.pipeline.steps.vertical_crop else "center"
         crop = plan_crop(info, s.video.width, s.video.height, mode, center_x=edit["crop_center_x"])
+        fc = s.video.crop.follow_cursor
+        if mode == "smart" and fc.enabled and edit.get("cursor_track"):
+            track = CursorTrack.from_dict(edit["cursor_track"])
+            crop = plan_cursor_crop(crop, track, keep, fc)
 
         pulses = []
         if s.pipeline.steps.auto_zoom and s.video.zoom.enabled:
@@ -306,7 +377,7 @@ class RenderCutStep(Step):
             output_duration=edit["output_duration"],
         )
         ctx.set_artifact("cut_video", out)
-        ctx.data["crop"] = {"x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h, "mode": crop.mode}
+        ctx.data["crop"] = crop.to_dict()
         ctx.data["zoom_pulses"] = len(pulses)
         return {"crop": ctx.data["crop"], "zoom_pulses": len(pulses)}
 
@@ -434,6 +505,8 @@ class SubtitlesStep(Step):
             branding=s.video.branding if s.pipeline.steps.branding else None,
             intro_text=script.hook if script else "",
             outro_text=script.cta if script else s.script.cta_default,
+            intro_seconds=s.video.branding.intro_seconds,
+            outro_seconds=s.video.branding.outro_seconds,
         )
         sub_cfg = (
             s.subtitles
@@ -473,6 +546,8 @@ class RenderFinalStep(Step):
             logo_position=(40, 60 + s.video.progress_bar.height) if logo else None,
         )
         info = self.ff.probe(out)
+        if not info.has_video or info.duration <= 0:
+            raise RuntimeError("final render produced an unreadable file")
         ctx.set_artifact("final_video", out)
         ctx.data["final"] = {
             "duration": info.duration,
@@ -481,6 +556,16 @@ class RenderFinalStep(Step):
             "size_bytes": info.size_bytes,
         }
         self.db.update_job(ctx.job_id, duration_seconds=info.duration)
+        # Low-disk: the cut/synced intermediates are superseded by final.mp4 now.
+        # Only the artefacts the resume logic requires for *later* steps are kept.
+        # (the thumbnail step still wants the clean, overlay-free video, so the
+        # *last* pre-overlay file is dropped there; cut.mp4 goes now when synced.mp4 exists)
+        if s.pipeline.delete_intermediates_early and ctx.artifact("synced_video") != ctx.artifact(
+            "cut_video"
+        ):
+            freed = _drop_artifacts(ctx, "cut_video")
+            if freed:
+                log.info("Deleted superseded intermediate cut.mp4 (%.0f MB)", freed / 1e6)
         return ctx.data["final"]
 
 
@@ -513,6 +598,11 @@ class ThumbnailStep(Step):
             files = gen.write_brief(brief, ctx.work_dir)
             ctx.set_artifact("brief_md", files["md"])
             ctx.set_artifact("brief_json", files["json"])
+        # Low-disk: the pre-overlay video was only still needed for this clean frame grab.
+        if s.pipeline.delete_intermediates_early:
+            freed = _drop_artifacts(ctx, "synced_video", "cut_video")
+            if freed:
+                log.info("Deleted superseded pre-overlay video (%.0f MB)", freed / 1e6)
         return {"thumbnail": str(thumb)}
 
 
@@ -646,7 +736,20 @@ class CleanupWorkStep(Step):
         return self.settings.pipeline.cleanup_work_on_success
 
     def run(self, ctx: JobContext) -> dict[str, Any]:
-        # keep state.json + final for traceability? No: everything needed is in output/. Remove work dir.
+        # Never delete work files before the output package is verified: the
+        # packaged video must exist, be readable and match the rendered final.
+        out_dir = Path(ctx.data.get("output_dir") or "")
+        packaged = out_dir / f"{ctx.slug}.mp4"
+        if not out_dir.is_dir() or not packaged.exists():
+            raise RuntimeError(f"output package missing ({packaged}); keeping work directory")
+        expected = int((ctx.data.get("final") or {}).get("size_bytes") or 0)
+        if expected and packaged.stat().st_size != expected:
+            raise RuntimeError(
+                f"packaged video size {packaged.stat().st_size} != rendered {expected}; keeping work directory"
+            )
+        if not (out_dir / "manifest.json").exists():
+            raise RuntimeError("manifest.json missing from package; keeping work directory")
+        # Everything needed lives in output/ now: remove the work dir (state.json stays for traceability).
         removed = 0
         for p in ctx.work_dir.iterdir():
             if p.name == "state.json":
@@ -680,6 +783,22 @@ DEFAULT_STEPS: list[type[Step]] = [
 
 
 # ------------------------------------------------------------------ helpers
+def _drop_artifacts(ctx: JobContext, *keys: str) -> int:
+    """Delete the files behind ``keys`` (if they exist) and forget them; returns bytes freed."""
+    freed = 0
+    seen: set[Path] = set()
+    for key in keys:
+        p = ctx.artifact(key)
+        if p is None:
+            continue
+        if p.exists() and p not in seen and p.parent == ctx.work_dir:
+            freed += p.stat().st_size
+            p.unlink(missing_ok=True)
+            seen.add(p)
+        ctx.artifacts.pop(key, None)
+    return freed
+
+
 def _load_transcript(ctx: JobContext) -> Transcript:
     p = ctx.artifact("transcript_json")
     if p and p.exists():
@@ -705,8 +824,25 @@ def _website_from_filename(source: Path) -> str:
 
 
 def _narration_transcript(narr: dict[str, Any], script: Script, duration: float) -> Transcript:
-    """Word timings for narration: distribute each sentence's words evenly across its timing."""
+    """Word timings for narration.
+
+    Preferred: the Whisper-aligned per-word timings stored by ``NarrationStep``
+    (narration clock == final clock, see ``contentforge/ai/alignment.py``).
+    Fallback: distribute each sentence's words evenly across its TTS timing.
+    """
+    from contentforge.ai.alignment import Alignment
     from contentforge.ai.transcriber import TranscriptSegment, TranscriptWord
+
+    if narr.get("alignment"):
+        try:
+            al = Alignment.from_dict(narr["alignment"])
+            if al.ok:
+                sentences = [
+                    (float(s), float(e), str(t)) for s, e, t in narr.get("sentences") or []
+                ]
+                return al.to_transcript(sentences or None, duration)
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("Stored word alignment unusable (%s); sentence timings", exc)
 
     segments = []
     for i, (start, end, text) in enumerate(narr.get("sentences") or []):

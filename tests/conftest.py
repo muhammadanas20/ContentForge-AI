@@ -28,6 +28,18 @@ def settings(tmp_path: Path):
 
 
 @pytest.fixture()
+def fast_settings(settings):
+    """Settings tuned for fast test renders (small frame, ultrafast, no retries)."""
+    settings.video.width, settings.video.height, settings.video.fps = 540, 960, 24
+    settings.video.preset, settings.video.crf = "ultrafast", 30
+    settings.pipeline.retries = 0
+    settings.pipeline.retry_backoff_seconds = 0
+    settings.audio.silence.threshold_db = -30
+    settings.audio.silence.min_duration = 0.5
+    return settings
+
+
+@pytest.fixture()
 def ffmpeg():
     if not ffmpeg_available():
         pytest.skip("ffmpeg not available")

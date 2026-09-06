@@ -76,3 +76,35 @@ def test_invalid_value_rejected(tmp_path):
 def test_missing_file_raises(tmp_path):
     with pytest.raises(ConfigError):
         load_settings(tmp_path / "nope.yaml", root=tmp_path, environ={})
+
+
+def test_presets_apply_env_and_none():
+    from contentforge.config.loader import ConfigError, apply_preset
+
+    base = yaml.safe_load((REPO / "config" / "config.yaml").read_text())
+    s = load_settings(REPO / "config" / "config.yaml", root=REPO, environ={})
+    assert s.preset == "student_reel"
+    assert s.video.zoom.max_zoom == 1.10  # preset value, not the base 1.12
+    assert s.video.crop.follow_cursor.enabled and s.subtitles.word_level.enabled
+    assert s.video.branding.watermark_text == "StudentTools.pk" and s.video.progress_bar.enabled
+    # env selects another preset; env overrides still win over the preset
+    s2 = load_settings(
+        REPO / "config" / "config.yaml",
+        root=REPO,
+        environ={"CONTENTFORGE_PRESET": "fast_preview", "CONTENTFORGE__VIDEO__FPS": "20"},
+    )
+    assert s2.preset == "fast_preview" and s2.video.width == 720 and s2.video.fps == 20
+    assert s2.transcription.model_size == "tiny"
+    # 'none' -> raw base config
+    s3 = load_settings(
+        REPO / "config" / "config.yaml", root=REPO, environ={"CONTENTFORGE_PRESET": "none"}
+    )
+    assert s3.preset == "none" and s3.video.zoom.max_zoom == 1.12
+    # unknown preset / malformed preset are hard errors
+    with pytest.raises(ConfigError):
+        apply_preset(base, "does_not_exist")
+    with pytest.raises(ConfigError):
+        apply_preset({"presets": {"x": {"preset": "y"}}}, "x")
+    with pytest.raises(ConfigError):
+        apply_preset({"presets": {"x": 5}}, "x")
+    assert apply_preset({"presets": {}}, None)["preset"] == "none"

@@ -79,6 +79,31 @@ Three clocks exist and the code is explicit about which one it uses:
 * **Output time** - after cuts. `Timeline.to_output()` maps source → output; captions from original speech are remapped this way.
 * **Final time** - after the video is retimed (`setpts`) or extended (`tpad`) to match narration length.
   Narration sentence timings are natively in this clock, so narration captions need no remap.
+  Word-level timings (v0.2) come from Whisper run on the narration WAV, which is mixed from `t = 0` of the final
+  video - so they are also final-clock values and need no remap either (`contentforge/ai/alignment.py`).
+
+The cursor-aware crop lives in **source time** while tracking (`CursorTrack`) and is converted to **output time**
+per kept segment by `plan_cursor_crop` (`video_editor.py`); the crop `x` expression is evaluated by FFmpeg after
+`trim`/`concat`, i.e. in output time, so it stays aligned with every cut. Across a cut that removes
+≥ `snap_gap_seconds` the window re-centres instead of panning.
+
+## Cursor-aware crop (v0.2)
+
+```
+analyse_video  ──(same decode pass)──▶ CursorTracker.update(frame, t)   # processing/cursor.py
+                                        │ frame diff → small compact blobs → score (size, two-tone,
+                                        │ online template NCC, continuity, "left-behind" penalty)
+                                        ▼
+                                  CursorTrack (t, x, y, detected)  → state.json["edit"]["cursor_track"]
+render_cut:  plan_crop (static) ─▶ plan_cursor_crop(track, keep, cfg)
+                                        │ follow_path: dead-zone + EMA + max pan speed + clamp
+                                        │ simplify_keyframes (RDP) → per-segment (t_out, x_px) keyframes
+                                        ▼
+             CropPlan.ffmpeg = crop=W:H:x='clip(<piecewise-linear t expr>,0,SW-W)':y=Y
+```
+
+Fallbacks, in order: `follow_cursor.enabled: false` → static smart crop; track unreliable
+(`min_detections`/`min_coverage`) → static smart crop; cursor never leaves the window → static crop centred on it.
 
 ## Why these technical choices
 

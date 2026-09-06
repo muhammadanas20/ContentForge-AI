@@ -32,6 +32,8 @@ console = Console()
 
 
 def _settings(args: argparse.Namespace):
+    if getattr(args, "preset", None):
+        os.environ["CONTENTFORGE_PRESET"] = args.preset
     try:
         s = load_settings(args.config) if getattr(args, "config", None) else load_settings()
     except ConfigError as exc:
@@ -192,7 +194,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     s = _settings(args)
     ok = True
-    console.print(f"[bold]ContentForge-AI {__version__}[/bold] - root {s.root}")
+    console.print(f"[bold]ContentForge-AI {__version__}[/bold] - root {s.root} - preset {s.preset}")
     if ffmpeg_available():
         ff = FFmpeg()
         console.print(f"[green]✔[/green] ffmpeg {ff.version()} ({ff.ffmpeg_bin})")
@@ -288,6 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"contentforge {__version__}")
     p.add_argument("-c", "--config", help="path to config.yaml (default: config/config.yaml)")
+    p.add_argument(
+        "-p",
+        "--preset",
+        help="config preset to apply (see 'presets' in config.yaml; 'none' to disable)",
+    )
     p.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     p.add_argument("-q", "--quiet", action="store_true", help="disable console logging")
     sub = p.add_subparsers(dest="command", required=True)

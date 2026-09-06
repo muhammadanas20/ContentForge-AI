@@ -51,6 +51,20 @@ Automatic (daily cron + when disk is low) and manual (`contentforge cleanup [--d
 Guards: nothing modified in the last `min_age_minutes`; nothing belonging to `processing`/`queued` jobs; deletions are
 restricted to the configured data folders (`safe_rmtree`).
 
+### Low-disk design inside a job (v0.2)
+
+* `pipeline.min_free_disk_gb_to_start` (1 GB): the probe step refuses to start a job below this floor with a clear
+  error; retry later with `contentforge retry <id>`.
+* `pipeline.delete_intermediates_early` (on): `cut.mp4` is deleted as soon as `final.mp4` has been rendered and
+  probed; `synced.mp4` after the thumbnail frame grab. Peak scratch usage drops from ~3× to ~1.5× the final size.
+  A later `retry --from render_final` re-renders only what is missing.
+* `cleanup_work` verifies the package first: output directory + `manifest.json` exist and the packaged MP4 has exactly
+  the rendered size. Otherwise the step fails and the work directory is kept.
+* Nothing in the pipeline ever deletes a package; only the retention rules above do, and never for jobs that are
+  `processing`/`queued`.
+
+See `docs/fedora-real-system-test.md` §8 for a complete low-disk `config.local.yaml`.
+
 ## Database maintenance
 
 ```bash

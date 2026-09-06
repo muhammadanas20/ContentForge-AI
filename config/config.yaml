@@ -8,6 +8,89 @@
 # Secrets (API keys) are NEVER placed here - use .env / environment variables.
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Presets: named partial configs deep-merged on top of everything below.
+# Select with `preset:` here, CONTENTFORGE_PRESET=<name>, or `contentforge --preset`.
+# `preset: none` disables presets. The base values below are the raw defaults;
+# `student_reel` is the opinionated StudentTools.pk look used in production.
+# -----------------------------------------------------------------------------
+preset: "student_reel"
+
+presets:
+  # Clean, fast, modern educational Reel for StudentTools.pk tutorials.
+  student_reel:
+    video:
+      width: 1080
+      height: 1920
+      fps: 30
+      crf: 20
+      crop:
+        mode: "smart"
+        follow_cursor:
+          enabled: true
+          deadzone: 0.3
+          smoothing: 0.8
+          max_speed: 1.5
+      zoom:
+        enabled: true
+        max_zoom: 1.10       # subtle emphasis, never a "punch-in" effect
+        duration_seconds: 2.5
+        ease: "in-out"
+      transitions:
+        enabled: true
+        type: "fade"
+        duration: 0.08
+      progress_bar:
+        enabled: true
+        height: 14
+        position: "top"
+      branding:
+        enabled: true
+        watermark_text: "StudentTools.pk"
+        watermark_position: "top-right"
+        intro_title: true
+        outro_cta: true
+        intro_seconds: 2.2
+        outro_seconds: 2.5
+    subtitles:
+      enabled: true
+      style: "bold-pop"
+      font_size: 68
+      max_words_per_caption: 4
+      max_chars_per_line: 22
+      position_v: 0.72
+      uppercase: true
+      word_level:
+        enabled: true
+    audio:
+      mix:
+        original_volume: 0.0  # screen-recording audio muted under narration
+        narration_volume: 1.0
+        music_volume: 0.08
+      loudness:
+        target_lufs: -14
+        true_peak: -1.5
+    tts:
+      speed: 1.0
+
+  # Same look, but faster + smaller for weak laptops / quick previews.
+  fast_preview:
+    video:
+      width: 720
+      height: 1280
+      fps: 24
+      crf: 28
+      preset: "veryfast"
+      crop:
+        follow_cursor:
+          sample_fps: 6
+          work_width: 640
+    transcription:
+      model_size: "tiny"
+    subtitles:
+      word_level:
+        enabled: false
+
 project:
   name: "ContentForge-AI"
   brand: "StudentTools.pk"
@@ -41,8 +124,15 @@ pipeline:
   # Retry policy for each step
   retries: 2
   retry_backoff_seconds: 5
-  # Delete per-video work directory after success
+  # Delete per-video work directory after success (only after the output
+  # package has been verified - see docs/maintenance.md)
   cleanup_work_on_success: true
+  # Low-disk design: delete large intermediates (cut.mp4, synced.mp4) as soon
+  # as a later step has superseded them instead of waiting until the end
+  delete_intermediates_early: true
+  # Refuse to START a job below this much free space on the data disk (GB).
+  # A 60 s 1080p job needs roughly 300-600 MB of scratch space. 0 = off.
+  min_free_disk_gb_to_start: 1.0
   # Steps that can be disabled without breaking the flow
   steps:
     transcribe: true
@@ -139,6 +229,22 @@ video:
     # Smart crop analyses frame activity to find the region of interest
     sample_fps: 2
     smoothing: 0.85
+    # Cursor-aware moving crop (only with mode: smart). The 9:16 window pans
+    # smoothly to keep the mouse cursor visible; falls back to the static smart
+    # crop when the cursor cannot be tracked reliably.
+    follow_cursor:
+      enabled: true
+      sample_fps: 10           # cursor tracker sampling rate
+      work_width: 960          # analysis resolution (lower = faster, less precise)
+      min_size_px: 8           # cursor bounding-box limits at source resolution
+      max_size_px: 64
+      deadzone: 0.3            # cursor may roam in the middle 30% of the window without panning
+      smoothing: 0.8           # 0 = instant, 0.95 = very lazy camera
+      max_speed: 1.5           # max pan speed in frame-widths per second
+      min_detections: 8        # fewer detections -> static crop fallback
+      min_coverage: 0.15       # detections/samples below this -> static crop fallback
+      keyframe_tolerance: 0.004
+      snap_gap_seconds: 1.0    # a cut that removes >= 1 s re-centres the window (no visible pan)
   zoom:
     enabled: true
     max_zoom: 1.12
@@ -169,14 +275,23 @@ video:
     font_size: 38
     logo_path: ""            # optional PNG in data/assets
     logo_width: 180
-    intro_title: true        # show hook text card in first ~2 seconds
-    outro_cta: true          # show CTA card in last ~2.5 seconds
+    intro_title: true        # show hook text card at the start
+    outro_cta: true          # show CTA card at the end
+    intro_seconds: 2.2       # hook card duration
+    outro_seconds: 2.5       # CTA card duration
     primary_color: "#FF7A00"
     secondary_color: "#FFFFFF"
     background_color: "#0F0F14"
 
 subtitles:
   enabled: true
+  # Word-level timing: the narration WAV is transcribed with Faster-Whisper
+  # (word timestamps) and aligned to the script so each caption word appears
+  # exactly when it is spoken. Falls back to per-sentence timing on failure.
+  word_level:
+    enabled: true
+    min_match_ratio: 0.6     # fewer script words matched -> sentence-level fallback
+    min_word_seconds: 0.06
   style: "bold-pop"          # bold-pop | clean | karaoke | minimal
   font: "DejaVu Sans"
   font_size: 68

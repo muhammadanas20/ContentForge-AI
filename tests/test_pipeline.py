@@ -71,17 +71,6 @@ class FailingTTS(FakeTTS):
 
 
 @pytest.fixture()
-def fast_settings(settings):
-    settings.video.width, settings.video.height, settings.video.fps = 540, 960, 24
-    settings.video.preset, settings.video.crf = "ultrafast", 30
-    settings.pipeline.retries = 0
-    settings.pipeline.retry_backoff_seconds = 0
-    settings.audio.silence.threshold_db = -30
-    settings.audio.silence.min_duration = 0.5
-    return settings
-
-
-@pytest.fixture()
 def patched(monkeypatch, ffmpeg):
     monkeypatch.setattr(steps_mod, "Transcriber", FakeTranscriber)
     monkeypatch.setattr(steps_mod, "get_tts_engine", lambda cfg: FakeTTS(ffmpeg))
@@ -194,19 +183,20 @@ def test_pipeline_resume_after_failure(fast_settings, ffmpeg, sample_video, patc
     assert db.get_job(ctx.job_id)["status"] == "failed"
     assert "transcribe" in ctx.completed_steps and "script" not in ctx.completed_steps
 
-    # resume: transcribe must NOT run again; script retried and everything completes
-    transcribe_calls = {"n": 0}
+    # resume: the source audio must NOT be transcribed again (the only ASR call
+    # allowed is the word-alignment pass on the narration WAV); script retried
+    transcribed: list[str] = []
     real = FakeTranscriber.transcribe
 
     def counting(self, p):
-        transcribe_calls["n"] += 1
+        transcribed.append(Path(p).name)
         return real(self, p)
 
     monkeypatch.setattr(FakeTranscriber, "transcribe", counting)
     ctx2 = runner.load_job(ctx.job_id)
     r2 = runner.run(ctx2)
     assert r2.status == "archived", r2.error
-    assert transcribe_calls["n"] == 0
+    assert transcribed == ["narration.wav"]
     assert calls["n"] == 2
     assert db.get_steps(ctx.job_id)["script"]["attempts"] == 2
     db.close()
@@ -216,6 +206,9 @@ def test_force_from_step_and_resume_incomplete(fast_settings, ffmpeg, sample_vid
     s = fast_settings
     s.pipeline.steps.archive = False
     s.pipeline.cleanup_work_on_success = False
+    # keep cut/synced intermediates so a forced re-run from 'subtitles' does not
+    # need to re-render them (the low-disk default re-renders; see the low-disk test)
+    s.pipeline.delete_intermediates_early = False
     db = Database(s.paths.db)
     src = _drop(sample_video, s)
     runner = PipelineRunner(s, db, ffmpeg)
@@ -266,3 +259,73 @@ def test_step_names_unique():
     names = [c.name for c in DEFAULT_STEPS]
     assert len(names) == len(set(names))
     assert all(issubclass(c, Step) for c in DEFAULT_STEPS)
+
+
+def test_low_disk_design_intermediates_and_package_guard(
+    fast_settings, ffmpeg, sample_video, patched, monkeypatch
+):
+    """Intermediates go early, work dir only goes after the package is verified,
+    and a job refuses to start below the free-space floor."""
+    import contentforge.pipeline.steps as sm
+
+    s = fast_settings
+    s.pipeline.cleanup_work_on_success = False  # keep the work dir to inspect it
+    db = Database(s.paths.db)
+    src = _drop(sample_video, s)
+    runner = PipelineRunner(s, db, ffmpeg)
+    ctx = runner.create_job(src)
+    seen: dict[str, list[str]] = {}
+    real = sm.PackageStep.run
+
+    def spy(self, c):
+        seen["before_package"] = sorted(p.name for p in c.work_dir.iterdir())
+        return real(self, c)
+
+    monkeypatch.setattr(sm.PackageStep, "run", spy)
+    r = runner.run(ctx)
+    assert r.status == "archived", r.error
+    # cut.mp4 / synced.mp4 were removed before packaging, final.mp4 still there
+    assert "cut.mp4" not in seen["before_package"] and "synced.mp4" not in seen["before_package"]
+    assert "final.mp4" in seen["before_package"]
+    assert "cut_video" not in ctx.artifacts and "synced_video" not in ctx.artifacts
+    assert not (ctx.work_dir / "cut.mp4").exists() and not (ctx.work_dir / "synced.mp4").exists()
+    # resuming from render_final self-heals: the missing intermediates are re-rendered
+    ctx2 = runner.load_job(ctx.job_id)
+    r2 = runner.run(ctx2, force_from="render_final")
+    assert r2.status == "archived", r2.error
+    assert db.get_steps(ctx.job_id)["render_cut"]["attempts"] == 2
+    db.close()
+
+    # cleanup_work refuses to delete when the package is missing/corrupt
+    s.pipeline.cleanup_work_on_success = True
+    s2 = s
+    db = Database(s2.paths.db)
+    src = _drop(sample_video, s2, name="guard - demo.mp4")
+    runner = PipelineRunner(s2, db, ffmpeg)
+    ctx3 = runner.create_job(src)
+    real_pkg = sm.PackageStep.run
+
+    def truncating(self, c):
+        out = real_pkg(self, c)
+        (Path(out["output_dir"]) / f"{c.slug}.mp4").write_bytes(b"corrupt")
+        return out
+
+    monkeypatch.setattr(sm.PackageStep, "run", truncating)
+    r3 = runner.run(ctx3)
+    assert r3.status == "failed" and "cleanup_work" in r3.error and "size" in r3.error
+    assert (ctx3.work_dir / "final.mp4").exists()  # nothing deleted
+    db.close()
+
+    # free-space floor: probe step refuses to start
+    monkeypatch.setattr(sm.PackageStep, "run", real_pkg)
+    monkeypatch.setattr(sm, "disk_free_gb", lambda p: 0.2)
+    db = Database(s.paths.db)
+    src = _drop(sample_video, s, name="nospace - demo.mp4")
+    runner = PipelineRunner(s, db, ffmpeg)
+    ctx4 = runner.create_job(src)
+    r4 = runner.run(ctx4)
+    assert r4.status == "failed" and "probe" in r4.error and "free" in r4.error
+    s.pipeline.min_free_disk_gb_to_start = 0
+    r5 = runner.run(runner.load_job(ctx4.job_id))
+    assert r5.status == "archived", r5.error
+    db.close()

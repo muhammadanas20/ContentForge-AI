@@ -4,8 +4,12 @@ Resolution order (later wins):
 
 1. Built-in defaults from :class:`~contentforge.config.schema.Settings`.
 2. ``config/config.yaml`` (or the file pointed to by ``CONTENTFORGE_CONFIG``).
-3. ``config/config.local.yaml`` next to it, if present (git-ignored overrides).
-4. Environment variables ``CONTENTFORGE__SECTION__KEY=value``.
+3. The active *preset* (``preset: student_reel`` -> ``presets.student_reel``),
+   a named partial config deep-merged on top (``CONTENTFORGE_PRESET`` env var
+   selects a different one; ``preset: none`` disables presets).
+4. ``config/config.local.yaml`` next to it, if present (git-ignored overrides;
+   it may also define presets or pick ``preset:``).
+5. Environment variables ``CONTENTFORGE__SECTION__KEY=value``.
 
 Secrets never live in YAML; they are read directly from the environment by the
 modules that need them (see :mod:`contentforge.ai.llm`).
@@ -85,6 +89,35 @@ def _env_overrides(environ: dict[str, str] | None = None) -> dict[str, Any]:
     return out
 
 
+def apply_preset(data: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+    """Deep-merge the selected preset from ``data["presets"]`` into ``data``.
+
+    ``name`` (env/CLI) wins over ``data["preset"]``.  ``"none"`` / empty disables.
+    Unknown names raise :class:`ConfigError` so typos never silently produce a
+    default-looking video.
+    """
+    presets = data.get("presets") or {}
+    if not isinstance(presets, dict):
+        raise ConfigError("'presets' must be a mapping of name -> partial config")
+    chosen = (name if name is not None else data.get("preset", "")) or ""
+    chosen = str(chosen).strip()
+    if not chosen or chosen.lower() == "none":
+        return {**data, "preset": "none"}
+    if chosen not in presets:
+        raise ConfigError(
+            f"Unknown preset '{chosen}'. Available: {', '.join(sorted(presets)) or '-'}"
+        )
+    override = presets[chosen] or {}
+    if not isinstance(override, dict):
+        raise ConfigError(f"Preset '{chosen}' must be a mapping")
+    for key in ("preset", "presets"):
+        if key in override:
+            raise ConfigError(f"Preset '{chosen}' may not set '{key}'")
+    merged = deep_merge(data, override)
+    merged["preset"] = chosen
+    return merged
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -127,8 +160,12 @@ def load_settings(
 
     data = _read_yaml(path)
     local = path.with_name("config.local.yaml")
-    if local.exists():
-        data = deep_merge(data, _read_yaml(local))
+    local_data: dict[str, Any] = _read_yaml(local) if local.exists() else {}
+    # local file may define/select presets, so merge it before resolving the preset...
+    data = deep_merge(data, local_data)
+    data = apply_preset(data, env.get("CONTENTFORGE_PRESET"))
+    # ...and its explicit values still win over the preset afterwards.
+    data = deep_merge(data, {k: v for k, v in local_data.items() if k not in ("preset", "presets")})
     data = deep_merge(data, _env_overrides(env))
     if overrides:
         data = deep_merge(data, overrides)

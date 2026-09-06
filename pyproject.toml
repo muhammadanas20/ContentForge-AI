@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contentforge-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI Content Factory: turn raw screen recordings into publish-ready Instagram Reels and Shorts for StudentTools.pk"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -120,11 +120,14 @@ class PipelineRunner:
             self._reset_from(ctx, force_from)
 
         steps = [cls(self.settings, self.db, self.ff) for cls in self.step_classes]
+        pending = {st.name for st in steps if st.name not in ctx.completed_steps}
         try:
             for step in steps:
                 if ctx.job_id in self._cancel:
                     raise PipelineError(step.name, "cancelled by operator")
-                if step.name in ctx.completed_steps and self._artifacts_present(ctx, step.name):
+                if step.name in ctx.completed_steps and self._artifacts_present(
+                    ctx, step.name, pending
+                ):
                     log.info("step %-14s skip (already done)", step.name)
                     continue
                 if not step.enabled:
@@ -197,21 +200,36 @@ class PipelineRunner:
         log.info("step %-14s done in %.1fs %s", name, dt, _short(outputs))
 
     # ---------------------------------------------------------- resume
-    def _artifacts_present(self, ctx: JobContext, step_name: str) -> bool:
-        required = {
-            "extract_audio": ["source_audio"],
-            "transcribe": ["transcript_json"],
-            "script": ["script_json"],
-            "render_cut": ["cut_video"],
-            "sync_audio": ["mixed_audio"],
-            "subtitles": ["ass"],
-            "render_final": ["final_video"],
-            "thumbnail": ["thumbnail"],
-            "social": ["social_json"],
-        }
-        for key in required.get(step_name, []):
+    # artefacts a completed step must still provide; large intermediates are
+    # deleted early (low-disk design), so they only count when a step that
+    # consumes them still has to run.
+    _REQUIRED: dict[str, list[str]] = {
+        "extract_audio": ["source_audio"],
+        "transcribe": ["transcript_json"],
+        "script": ["script_json"],
+        "render_cut": ["cut_video"],
+        "sync_audio": ["mixed_audio", "synced_video"],
+        "subtitles": ["ass"],
+        "render_final": ["final_video"],
+        "thumbnail": ["thumbnail"],
+        "social": ["social_json"],
+    }
+    _CONSUMERS: dict[str, set[str]] = {
+        "cut_video": {"sync_audio", "render_final", "thumbnail"},
+        "synced_video": {"render_final", "thumbnail"},
+    }
+
+    def _artifacts_present(
+        self, ctx: JobContext, step_name: str, pending: set[str] | None = None
+    ) -> bool:
+        for key in self._REQUIRED.get(step_name, []):
+            consumers = self._CONSUMERS.get(key)
+            if consumers is not None and pending is not None and not (consumers & pending):
+                continue  # nobody left to use it - fine that it was cleaned up
             if not ctx.has_artifact(key):
                 log.info("step %-14s artefact %r missing - re-running", step_name, key)
+                if pending is not None:
+                    pending.add(step_name)
                 return False
         return True
 

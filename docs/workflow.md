@@ -12,22 +12,22 @@
 
 | # | Step | Input → Output | Notes |
 |---|---|---|---|
-| 1 | `probe` | source → media info | Rejects files without video, < 0.5 s or > 3× `max_duration_seconds` |
+| 1 | `probe` | source → media info | Rejects files without video, < 0.5 s or > 3× `max_duration_seconds`; refuses to start below `min_free_disk_gb_to_start` |
 | 2 | `extract_audio` | source → `source_audio.wav` (16 kHz mono) | Silent track synthesised if the recording has no audio |
 | 3 | `transcribe` | wav → `transcript.txt/.srt/.json` | Faster-Whisper with word timestamps + VAD |
 | 4 | `script` | transcript → `script.json/.md` | Hook + steps + CTA, keywords, title; LLM optional |
-| 5 | `narration` | script → `narration.wav` + sentence timings | Piper/Kokoro/Edge; on failure the original audio is used |
-| 6 | `analyse` | wav + frames → edit plan | Silence detection, motion sampling, keep-list, crop centre, duration cap |
-| 7 | `render_cut` | source → `cut.mp4` (silent, 9:16) | trim/concat, crop, `zoompan` pulses, per-segment fades |
+| 5 | `narration` | script → `narration.wav` + sentence timings + **word alignment** | Piper/Kokoro/Edge; Whisper on the WAV aligns script words (`word_alignment: 91%` / `fallback-sentence`); on TTS failure the original audio is used |
+| 6 | `analyse` | wav + frames → edit plan + cursor track | Silence detection, motion sampling, **cursor tracking** (same decode pass), keep-list, crop centre, duration cap |
+| 7 | `render_cut` | source → `cut.mp4` (silent, 9:16) | trim/concat, **cursor-following crop** (static smart crop fallback), `zoompan` pulses, per-segment fades |
 | 8 | `sync_audio` | cut + narration → `synced.mp4`, `mix.wav` | Retime/freeze to narration length; mix + loudnorm |
 | 9 | `subtitles` | timings → `subtitles.srt/.json/.txt`, `overlay.ass` | Captions + progress bar + watermark + hook/CTA cards |
-| 10 | `render_final` | synced + mix + ass → `final.mp4` | libx264, faststart; optional PNG logo overlay |
-| 11 | `thumbnail` | frame → `thumbnail.jpg`, `thumbnail_brief.md/.json` | Pillow render + Canva brief |
+| 10 | `render_final` | synced + mix + ass → `final.mp4` | libx264, faststart; optional PNG logo overlay; deletes `cut.mp4` afterwards (`delete_intermediates_early`) |
+| 11 | `thumbnail` | frame → `thumbnail.jpg`, `thumbnail_brief.md/.json` | Pillow render + Canva brief; deletes `synced.mp4` afterwards |
 | 12 | `social` | script → `social.json`, `caption.md` | Caption, CTA, comment prompt, hashtags (rotation-aware), SEO, YT title |
 | 13 | `package` | everything → `output/<slug>/` + `manifest.json` + `README.md` | |
 | 14 | `analytics` | — | Registers zero-baseline metrics per platform |
 | 15 | `archive` | source → `archive/YYYY-MM/<slug>/` | Moves raw recording, copies transcript/script |
-| 16 | `cleanup_work` | work dir emptied | Only `state.json` remains |
+| 16 | `cleanup_work` | work dir emptied | Only after the package is verified (dir + manifest + exact MP4 size); only `state.json` remains |
 
 Disable any stage in `pipeline.steps`. Disabled steps are recorded as `skipped`.
 

@@ -80,6 +80,9 @@ python -c "from contentforge.config import load_settings; from contentforge.ai.t
 To use another Piper voice pick a name from https://huggingface.co/rhasspy/piper-voices (e.g. `en_GB-alan-medium`,
 `en_US-amy-medium`) and set `tts.piper.voice`.
 
+For a step-by-step verification of the models on a real Fedora laptop (TTS listen test, word-alignment check,
+first video, low-disk settings) follow **`docs/fedora-real-system-test.md`**.
+
 ## 6. Optional components
 
 ### Kokoro TTS (higher quality, heavier)
