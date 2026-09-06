@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contentforge.ai.tts.base import TTSEngine, TTSError
 from contentforge.ai.tts.edge_engine import EdgeTTS
+from contentforge.ai.tts.espeak_engine import EspeakTTS
 from contentforge.ai.tts.kokoro_engine import KokoroTTS
 from contentforge.ai.tts.piper_engine import PiperTTS
 from contentforge.config.schema import TTSConfig
@@ -11,7 +12,9 @@ from contentforge.log import get_logger
 
 log = get_logger("tts")
 
-ENGINE_ORDER = ("piper", "kokoro", "edge")
+# Preference order for automatic fallback. eSpeak is last: it always works
+# (no model, no network) so narration is never silently dropped.
+ENGINE_ORDER = ("piper", "kokoro", "edge", "espeak")
 
 
 def _build(name: str, config: TTSConfig) -> TTSEngine:
@@ -21,6 +24,8 @@ def _build(name: str, config: TTSConfig) -> TTSEngine:
         return KokoroTTS(config.kokoro, speed=config.speed)
     if name == "edge":
         return EdgeTTS(config.edge, speed=config.speed, sample_rate=config.output_sample_rate)
+    if name == "espeak":
+        return EspeakTTS(voice=config.espeak.voice, speed=config.speed, words_per_minute=config.espeak.words_per_minute)
     raise TTSError(f"Unknown TTS engine '{name}'")
 
 

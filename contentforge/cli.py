@@ -194,7 +194,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     s = _settings(args)
     ok = True
-    console.print(f"[bold]ContentForge-AI {__version__}[/bold] - root {s.root} - preset {s.preset}")
+    console.print(
+        f"[bold]ContentForge-AI {__version__}[/bold] - root {s.root} - preset {s.preset} - "
+        f"pipeline [bold]{s.pipeline.mode}[/bold]"
+    )
     if ffmpeg_available():
         ff = FFmpeg()
         console.print(f"[green]✔[/green] ffmpeg {ff.version()} ({ff.ffmpeg_bin})")
@@ -220,6 +223,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except ImportError:
             console.print(f"[red]✘[/red] {label} missing")
             ok = ok and mod in ("streamlit",)
+    # OCR is optional: without tesseract the pipeline uses the heuristic
+    # text-region detector (boxes only, still enough for framing + gates).
+    from contentforge.processing.ocr import get_ocr_backend
+
+    backend = get_ocr_backend(s.understanding.ocr_engine, lang=s.understanding.ocr_languages)
+    if backend.name == "tesseract":
+        console.print("[green]✔[/green] OCR: tesseract (real text + boxes)")
+    else:
+        console.print(
+            "[yellow]![/yellow] OCR: heuristic text regions only "
+            "(install tesseract-ocr for text-aware scripts and captions)"
+        )
     engines = available_engines(s.tts)
     if engines:
         mark = "green]✔" if s.tts.engine in engines else "yellow]!"

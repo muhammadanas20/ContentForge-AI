@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "contentforge-ai"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI Content Factory: turn raw screen recordings into publish-ready Instagram Reels and Shorts for StudentTools.pk"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,11 +32,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tts = ["piper-tts>=1.2", "edge-tts>=6.1", "kokoro>=0.9", "soundfile>=0.12"]
+tts = ["piper-tts>=1.2", "edge-tts>=6.1", "kokoro>=0.9", "soundfile>=0.12", "espeakng-loader>=0.2"]
+ocr = ["pytesseract>=0.3.10"]
 dashboard = ["streamlit>=1.30", "pandas>=2.0"]
 postgres = ["sqlalchemy>=2.0", "psycopg2-binary>=2.9"]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.3"]
-all = ["contentforge-ai[tts,dashboard,postgres,dev]"]
+all = ["contentforge-ai[tts,ocr,dashboard,postgres,dev]"]
 
 [project.scripts]
 contentforge = "contentforge.cli:main"

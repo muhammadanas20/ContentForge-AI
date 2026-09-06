@@ -23,7 +23,8 @@ from contentforge.config.schema import Settings
 from contentforge.db import Database
 from contentforge.log import get_logger
 from contentforge.pipeline.context import JobContext
-from contentforge.pipeline.steps import DEFAULT_STEPS, Step
+from contentforge.pipeline.smart_steps import steps_for_mode
+from contentforge.pipeline.steps import Step
 from contentforge.utils import FFmpeg, RetryError, retry
 
 log = get_logger("pipeline")
@@ -61,7 +62,7 @@ class PipelineRunner:
         self.settings = settings
         self.db = db
         self.ff = ffmpeg or FFmpeg()
-        self.step_classes = steps or DEFAULT_STEPS
+        self.step_classes = steps or steps_for_mode(settings)
         self.on_progress = on_progress
         self._lock = threading.Lock()
         self._cancel: set[str] = set()
@@ -205,6 +206,15 @@ class PipelineRunner:
     # consumes them still has to run.
     _REQUIRED: dict[str, list[str]] = {
         "extract_audio": ["source_audio"],
+        # --- smart pipeline (v0.3)
+        "understand": ["understanding_json"],
+        "plan_edit": ["edit_plan_json"],
+        "compose": ["composed_video"],
+        "captions": ["overlay_json"],
+        "mix": ["mixed_audio"],
+        "cover": ["cover"],
+        "quality": ["quality_json"],
+        # --- classic pipeline (v0.2)
         "transcribe": ["transcript_json"],
         "script": ["script_json"],
         "render_cut": ["cut_video"],
@@ -217,6 +227,8 @@ class PipelineRunner:
     _CONSUMERS: dict[str, set[str]] = {
         "cut_video": {"sync_audio", "render_final", "thumbnail"},
         "synced_video": {"render_final", "thumbnail"},
+        "composed_video": {"render_final"},
+        "mixed_audio": {"render_final"},
     }
 
     def _artifacts_present(

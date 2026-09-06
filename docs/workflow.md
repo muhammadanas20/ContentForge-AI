@@ -8,7 +8,32 @@
 4. Later: open `data/output/<slug>/`, upload the MP4, paste `caption.txt`, optionally use `cover.jpg`.
 5. After ~48 h, enter views/likes/… in the dashboard **Analytics** tab.
 
-## Automated pipeline steps
+## Automated pipeline steps - smart mode (v0.3 default)
+
+`pipeline.mode: smart`. Full design notes: [docs/smart-pipeline.md](smart-pipeline.md).
+
+| # | Step | Input → Output | Notes |
+|---|---|---|---|
+| 1 | `probe` | source → media info | Same guards as classic (duration, video stream, free disk) |
+| 2 | `extract_audio` | source → `source_audio.wav` | Used for silence detection (and transcription if enabled) |
+| 3 | `understand` | source → `understanding.json` | Sampled frames, OCR boxes, cursor track, visual changes → action timeline (click/scroll/type/navigate/reveal/idle) |
+| 4 | `transcribe` | wav → `transcript.*` | Optional; the script is grounded in the *picture* first, the transcript only adds context |
+| 5 | `plan_edit` | understanding → `edit_plan.json` | Dead-time removal (screen **and** audio idle), action cuts, roles (hook/setup/demo/payoff/CTA), content-aware 9:16 framing per shot, zooms, click emphasis |
+| 6 | `script` | plan + understanding → `script_grounded.json`, `script.md`, `script.json` | Every segment carries `visual_action`, `focus_region` and source timestamps; degraded-minimal fallback when understanding is unavailable |
+| 7 | `narration` | script → `narration.wav` | One utterance per segment, `atempo`-fitted into its slot, placed on a silent bed the length of the Reel |
+| 8 | `compose` | source + plan → `composed.mp4` | Per-shot render (crop → canvas/fill layout → eased zoom) concatenated with stream copy |
+| 9 | `captions` | script/narration + plan → `overlay.json`, `captions.srt/.txt` | Word-highlighted chunks, band chosen away from the focus region, click rings, cards |
+| 10 | `mix` | narration (+ music, + clicks) → `mixed.wav` | Music ducked under speech (`sidechaincompress`), synthesised click ticks, limiter + loudnorm |
+| 11 | `render_final` | composed + overlay + mix → `final.mp4` | One libass pass, audio muxed; `composed.mp4` deleted afterwards |
+| 12 | `cover` | source + understanding → `cover.jpg` | Frames scored (reveal, text, stillness, in-edit); three concepts rendered, best kept |
+| 13 | `social` | script → `social.json`, `caption.md` | Unchanged from v0.2 |
+| 14 | `quality` | everything → `quality.json/.md` | 15 gates; errors block packaging when `quality.block_on_error` |
+| 15 | `package` | everything → `output/<slug>/` | Includes the quality report, edit plan and grounded script |
+| 16-18 | `analytics`, `archive`, `cleanup_work` | | Unchanged from v0.2 |
+
+## Automated pipeline steps - classic mode (v0.2)
+
+`pipeline.mode: classic`.
 
 | # | Step | Input → Output | Notes |
 |---|---|---|---|
@@ -51,6 +76,10 @@ output/<slug>/
   caption.md            caption, YouTube title, SEO description, CTA, prompt, hashtags
   social.json           same, machine-readable
   script.md / .json     hook, body, CTA, keywords, estimated seconds
+  script_grounded.json  smart mode: every segment with visual_action, focus_region, source timing
+  edit_plan.json        smart mode: shots, roles, framing, zooms, click emphasis
+  overlay.json          smart mode: caption chunks, bands, word timings, click rings
+  quality.md / .json    smart mode: the gate report for this Reel
   subtitles.srt/.ass/.json/.txt
   transcript.txt/.srt/.json
   narration.wav         raw TTS track (for re-edits)

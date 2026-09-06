@@ -60,6 +60,15 @@ class WatcherConfig(_Model):
 
 
 class PipelineSteps(_Model):
+    # --- v0.3 (smart pipeline)
+    understand: bool = True
+    plan_edit: bool = True
+    compose: bool = True
+    captions: bool = True
+    mix: bool = True
+    cover: bool = True
+    quality: bool = True
+    # --- v0.2 (classic pipeline)
     transcribe: bool = True
     script: bool = True
     narration: bool = True
@@ -78,6 +87,9 @@ class PipelineSteps(_Model):
 
 
 class PipelineConfig(_Model):
+    # "smart"   - v0.3 understanding-driven Reel pipeline (recommended)
+    # "classic" - v0.2 transcript-driven pipeline, kept for compatibility
+    mode: Literal["smart", "classic"] = "smart"
     max_workers: int = Field(1, ge=1, le=8)
     retries: int = Field(2, ge=0, le=10)
     retry_backoff_seconds: float = 5
@@ -161,13 +173,21 @@ class EdgeConfig(_Model):
     pitch: str = "+0Hz"
 
 
+class EspeakConfig(_Model):
+    """Always-available offline fallback voice (libespeak-ng via ctypes)."""
+
+    voice: str = "en-us"
+    words_per_minute: int = Field(165, ge=80, le=400)
+
+
 class TTSConfig(_Model):
-    engine: Literal["piper", "kokoro", "edge"] = "piper"
+    engine: Literal["piper", "kokoro", "edge", "espeak"] = "piper"
     speed: float = 1.0
     output_sample_rate: int = 24000
     piper: PiperConfig = Field(default_factory=PiperConfig)
     kokoro: KokoroConfig = Field(default_factory=KokoroConfig)
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
+    espeak: EspeakConfig = Field(default_factory=EspeakConfig)
 
 
 class CursorFollowConfig(_Model):
@@ -368,6 +388,112 @@ class DashboardConfig(_Model):
     log_tail_lines: int = 200
 
 
+class UnderstandingConfig(_Model):
+    """Frame sampling + OCR budget for the video understanding stage."""
+
+    enabled: bool = True
+    sample_fps: float = Field(6.0, gt=0, le=30)  # 6 fps detects clicks reliably
+    work_width: int = Field(960, ge=320, le=1920)  # frames are analysed downscaled
+    ocr_every_seconds: float = Field(1.0, gt=0)
+    ocr_engine: Literal["auto", "tesseract", "heuristic"] = "auto"
+    ocr_languages: str = "eng"
+    max_frames: int = Field(900, ge=30, le=5000)  # hard cap for long recordings
+    track_cursor: bool = True
+    website_url: str = ""  # optional grounding metadata (also per-job)
+    website_context: str = ""
+
+
+class FramingWeightsConfig(_Model):
+    text_kept: float = 1.0
+    text_cut: float = 2.0
+    cursor: float = 0.50
+    action: float = 0.90
+    prominence: float = 0.60
+    content: float = 0.35
+    legibility: float = 1.20
+    zoom_penalty: float = 0.25
+
+
+class FramingSettings(_Model):
+    """Content-aware 9:16 composition."""
+
+    target_width: int = 1080
+    target_height: int = 1920
+    max_zoom: float = Field(3.6, ge=1.0, le=8.0)  # never crop tighter than this
+    canvas_bias: float = Field(0.15, ge=0, le=1)  # tie-break towards the safe canvas layout
+    focus_boost: float = Field(4.0, ge=1.0, le=10.0)
+    focus_falloff: float = Field(0.20, gt=0, le=1)
+    samples_per_shot: int = Field(5, ge=1, le=30)
+    smoothing_deadzone: float = Field(0.06, ge=0, le=0.5)
+    smoothing_ema: float = Field(0.72, ge=0, le=1)
+    max_pan_per_second: float = Field(0.18, gt=0, le=2)
+    weights: FramingWeightsConfig = Field(default_factory=FramingWeightsConfig)
+
+
+class EditingConfig(_Model):
+    """Content-aware editing decisions (cuts, pacing, zooms, effects)."""
+
+    max_duration: float = Field(75.0, ge=10, le=180)
+    min_shot: float = Field(1.0, ge=0.3, le=5)
+    max_shot: float = Field(5.0, ge=1, le=15)
+    remove_dead_time: bool = True
+    min_dead_gap: float = Field(0.9, ge=0.2, le=5)
+    dead_padding: float = Field(0.15, ge=0, le=1)
+    max_speedup: float = Field(1.3, ge=1.0, le=2.5)
+    dynamic_zoom: bool = True
+    zoom_max: float = Field(1.07, ge=1.0, le=1.5)
+    hook_seconds: float = Field(2.0, ge=0.5, le=6)
+    setup_seconds: float = Field(3.0, ge=0.5, le=10)
+    cta_seconds: float = Field(1.8, ge=0.5, le=6)
+    payoff_fraction: float = Field(0.80, ge=0.4, le=0.98)
+    result_hold: float = Field(0.6, ge=0, le=4)
+    transitions: bool = True
+    click_effects: bool = True
+    click_sfx: bool = True
+    card_offset: int = -70
+    zoom_headroom: float = Field(1.12, ge=1.0, le=1.5)
+
+
+class ReelCaptionsConfig(_Model):
+    """Burned-in captions for the smart pipeline."""
+
+    enabled: bool = True
+    font: str = "DejaVu Sans"
+    font_size: int = Field(74, ge=30, le=140)
+    outline: int = Field(7, ge=0, le=20)
+    max_words: int = Field(4, ge=1, le=10)
+    max_chars: int = Field(26, ge=8, le=60)
+    highlight_color: str = "#FFB63D"
+    text_color: str = "#FFFFFF"
+    safe_bottom: int = Field(300, ge=0, le=800)
+    safe_top: int = Field(240, ge=0, le=800)
+    word_level: bool = True
+    hook_card: bool = True
+    progress_bar: bool = True
+    click_rings: bool = True
+
+
+class CoverConfig(_Model):
+    enabled: bool = True
+    width: int = 1080
+    height: int = 1920
+    title_size: int = Field(104, ge=40, le=200)
+    max_title_words: int = Field(7, ge=2, le=14)
+    concepts: list[str] = Field(default_factory=lambda: ["card", "banner", "split"])
+
+
+class QualityGateConfig(_Model):
+    enabled: bool = True
+    block_on_error: bool = True  # refuse to package a Reel that fails a hard gate
+    min_text_keep: float = Field(0.55, ge=0, le=1)
+    min_narration_coverage: float = Field(0.55, ge=0, le=1)
+    narration_slack_seconds: float = Field(2.5, ge=0, le=15)
+    min_duration: float = Field(6.0, ge=1, le=120)
+    max_duration: float = Field(95.0, ge=5, le=300)
+    max_peak_db: float = -0.2
+    min_mean_db: float = -34.0
+
+
 class Settings(_Model):
     """Root settings object."""
 
@@ -380,6 +506,12 @@ class Settings(_Model):
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
+    understanding: UnderstandingConfig = Field(default_factory=UnderstandingConfig)
+    framing: FramingSettings = Field(default_factory=FramingSettings)
+    editing: EditingConfig = Field(default_factory=EditingConfig)
+    reel_captions: ReelCaptionsConfig = Field(default_factory=ReelCaptionsConfig)
+    cover: CoverConfig = Field(default_factory=CoverConfig)
+    quality: QualityGateConfig = Field(default_factory=QualityGateConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     script: ScriptConfig = Field(default_factory=ScriptConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)

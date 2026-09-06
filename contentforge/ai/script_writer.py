@@ -374,3 +374,508 @@ def _title_case(s: str) -> str:
 
 def _clean_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
+
+
+# =========================================================================== v0.3
+# Grounded script planner: every narration beat is bound to a real visual
+# segment of the edit, and may only mention things the recording (or the
+# supplied website context) actually shows.
+# ---------------------------------------------------------------------------
+from contentforge.models.schemas import (  # noqa: E402
+    ActionEvent,
+    EditPlan,
+    GroundedScript,
+    Region,
+    ScriptSegment,
+    VideoUnderstanding,
+)
+
+_ROLE_ORDER = ("hook", "setup", "demo", "payoff", "cta")
+
+
+@dataclass
+class Beat:
+    """A stretch of the edit that one narration line will cover."""
+
+    role: str
+    start: float
+    end: float
+    src_start: float
+    src_end: float
+    actions: list[ActionEvent] = field(default_factory=list)
+    focus: Region | None = None
+    texts: list[str] = field(default_factory=list)
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
+class GroundedScriptPlanner:
+    """Writes a :class:`GroundedScript` from the edit plan + video understanding.
+
+    Grounding rules (enforced, not just prompted):
+
+    * only OCR strings that were actually seen, action labels, the website name
+      and the operator-supplied website context may become facts;
+    * when nothing was recognised (heuristic OCR backend, no text), the planner
+      falls back to describing *what happens* ("a click opens the offer") which
+      is still true, instead of inventing features;
+    * an optional LLM pass may rephrase, but a segment that introduces unknown
+      content words is discarded and the rule-based line is kept.
+    """
+
+    SYSTEM_PROMPT = (
+        "You rewrite narration lines for a {duration:.0f} second Instagram Reel by {brand} that shows "
+        "students a website. You are given, for each line, the exact visual action on screen and the "
+        "text that is visible. Rules: (1) NEVER mention anything that is not in the given facts. "
+        "(2) Keep each line under {max_words} words. (3) Simple, energetic, student-friendly English. "
+        "(4) Keep the same number of lines and the same order. "
+        'Respond ONLY with JSON: {{"lines": [str, ...]}}'
+    )
+
+    def __init__(
+        self,
+        config: ScriptConfig,
+        brand: str = "StudentTools.pk",
+        llm: LLMClient | None = None,
+        rng: random.Random | None = None,
+    ):
+        self.config = config
+        self.brand = brand
+        self.llm = llm or LLMClient()
+        self.rng = rng or random.Random(20250903)
+
+    # ------------------------------------------------------------------ api
+    def plan(
+        self,
+        edit: EditPlan,
+        understanding: VideoUnderstanding | None = None,
+        *,
+        website: str = "",
+        website_context: str = "",
+        transcript_text: str = "",
+    ) -> GroundedScript:
+        site = (website or "").strip()
+        duration = edit.duration or (understanding.duration if understanding else 0.0)
+        if duration <= 0:
+            return self._minimal(site, 0.0, transcript_text, reason="empty edit plan")
+        if understanding is None or not understanding.available or not edit.shots:
+            return self._minimal(site, duration, transcript_text, reason="no video understanding")
+
+        facts = self._collect_facts(understanding, website_context, transcript_text)
+        beats = self._beats(edit, understanding)
+        segments: list[ScriptSegment] = []
+        for beat in beats:
+            text, visual, evidence = self._line_for(beat, understanding, site, facts)
+            if not text:
+                continue
+            segments.append(
+                ScriptSegment(
+                    start=round(beat.start, 3),
+                    end=round(beat.end, 3),
+                    text=text,
+                    role=beat.role,
+                    visual_action=visual,
+                    focus_region=beat.focus,
+                    evidence=evidence,
+                    source_start=round(beat.src_start, 3),
+                    source_end=round(beat.src_end, 3),
+                )
+            )
+        script = GroundedScript(
+            title=self._title(site, facts),
+            segments=segments,
+            keywords=self._keywords(facts),
+            website=site or self.brand,
+            source="grounded-rule-based",
+            grounded=True,
+        )
+        script.notes.append(
+            f"OCR backend: {understanding.ocr_backend}"
+            + (" (text recognised)" if understanding.has_ocr_text else " (regions only)")
+        )
+        if website_context:
+            script.notes.append("website context supplied by the operator was used for grounding")
+        if self.llm.enabled:
+            polished = self._polish(script, facts, duration)
+            if polished is not None:
+                script = polished
+        _budget_segments(script, self.config.speaking_rate_wps)
+        log.info(
+            "Grounded script: %d segments, %d words over %.1fs (%s)",
+            len(script.segments),
+            script.word_count,
+            script.duration,
+            script.source,
+        )
+        return script
+
+    # --------------------------------------------------------------- beats
+    def _beats(self, edit: EditPlan, u: VideoUnderstanding) -> list[Beat]:
+        """Group shots into narration beats, one per visual idea."""
+        beats: list[Beat] = []
+        for shot in edit.shots:
+            actions = [
+                a
+                for a in u.actions_between(shot.src_start, shot.src_end)
+                if a.kind not in ("idle", "move")
+            ]
+            focus = next((a.region for a in actions if a.region is not None), None)
+            beat = Beat(
+                role=shot.role,
+                start=shot.out_start,
+                end=shot.out_end,
+                src_start=shot.src_start,
+                src_end=shot.src_end,
+                actions=actions,
+                focus=focus or u.content_region,
+            )
+            if beats and _mergeable(beats[-1], beat):
+                prev = beats[-1]
+                prev.end = beat.end
+                prev.src_end = beat.src_end
+                prev.actions.extend(beat.actions)
+                prev.focus = prev.focus or beat.focus
+            else:
+                beats.append(beat)
+        # a beat shorter than ~2.2 s cannot hold a sentence: fold it forward
+        merged: list[Beat] = []
+        for beat in beats:
+            if merged and beat.duration < 2.2 and merged[-1].role == beat.role:
+                merged[-1].end = beat.end
+                merged[-1].src_end = beat.src_end
+                merged[-1].actions.extend(beat.actions)
+            else:
+                merged.append(beat)
+        return merged
+
+    # --------------------------------------------------------------- facts
+    def _collect_facts(
+        self, u: VideoUnderstanding, website_context: str, transcript_text: str
+    ) -> dict[str, Any]:
+        texts = [t for t in u.dominant_texts(24) if len(t) >= 3]
+        headline = ""
+        for f in u.frames[: max(1, len(u.frames) // 3)]:
+            for b in f.text_boxes:
+                if b.has_text and len(b.text.split()) >= 3 and b.region.h > 0.02:
+                    headline = b.text.strip()
+                    break
+            if headline:
+                break
+        labels = [a.label.strip() for a in u.actions if a.label.strip()]
+        return {
+            "texts": texts,
+            "headline": headline,
+            "labels": labels,
+            "context": clean_transcript(website_context or ""),
+            "transcript": clean_transcript(transcript_text or ""),
+            "has_text": u.has_ocr_text,
+            "kinds": sorted({a.kind for a in u.actions}),
+        }
+
+    def _vocabulary(self, facts: dict[str, Any], site: str) -> set[str]:
+        blob = " ".join(
+            [
+                " ".join(facts.get("texts") or []),
+                facts.get("headline", ""),
+                " ".join(facts.get("labels") or []),
+                facts.get("context", ""),
+                facts.get("transcript", ""),
+                site,
+                self.brand,
+            ]
+        )
+        return set(_content_words(blob))
+
+    # ---------------------------------------------------------------- lines
+    def _line_for(
+        self, beat: Beat, u: VideoUnderstanding, site: str, facts: dict[str, Any]
+    ) -> tuple[str, str, list[str]]:
+        # words that can realistically be spoken while this shot is on screen
+        budget = max(4, int(beat.duration * max(1.0, self.config.speaking_rate_wps) * 1.15))
+        kind = _dominant_kind(beat.actions)
+        # only OCR-derived labels may be quoted; scroll/idle labels are our own
+        # descriptions and would read as invented copy
+        label = next(
+            (a.label.strip() for a in beat.actions if a.kind in ("click", "type", "reveal") and a.label.strip()),
+            "",
+        )
+        near_text = ""
+        if facts["has_text"]:
+            boxes = u.text_boxes_at((beat.src_start + beat.src_end) / 2, window=1.5)
+            boxes = [b for b in boxes if b.has_text and len(b.text.split()) >= 2]
+            boxes.sort(key=lambda b: -(b.region.area * max(0.2, b.confidence)))
+            near_text = boxes[0].text.strip() if boxes else ""
+        site_name = site or self.brand
+        evidence: list[str] = [t for t in (label, near_text) if t]
+        target = _shorten(label or near_text, 5)
+
+        if beat.role == "hook":
+            return self._hook(site_name, facts, budget), "opening frame of the recording", evidence
+        if beat.role == "setup":
+            variants = []
+            if facts["headline"]:
+                variants.append(f"This is {site_name}. {_shorten(facts['headline'], 9)}.")
+                evidence.append(facts["headline"])
+            if facts["context"]:
+                variants.append(f"This is {site_name}. {_first_sentence(facts['context'], 12)}")
+                evidence.append(facts["context"][:80])
+            variants += [
+                f"This is {site_name} - here is what it does.",
+                f"This is {site_name}.",
+            ]
+            return _pick(variants, budget), "the page we start from", evidence
+        if beat.role == "cta":
+            cta = self.config.cta_default or f"Follow {self.brand} for more."
+            return cta, "closing frame", []
+        if beat.role == "payoff":
+            variants = []
+            if target:
+                variants.append(f"And there it is - {target}.")
+            variants += ["And there is the result, right on screen.", "And there is your result."]
+            return _pick(variants, budget), "the result appears on screen", evidence
+
+        # ---- demonstration beats: describe the action that is actually visible
+        if kind == "click":
+            variants = ([f"Click {target} and it opens right away.", f"Click {target}."] if target else []) + [
+                "One click and it opens right away.",
+                "One click, done.",
+            ]
+            visual = f"click on {target}" if target else "click on the page"
+        elif kind == "type":
+            variants = ([f"Type your details into {target}."] if target else []) + [
+                "Fill in the short form here.",
+                "Type it in here.",
+            ]
+            visual = f"typing into {target}" if target else "typing into the form"
+        elif kind == "scroll":
+            variants = [
+                "Scroll down and everything is listed there.",
+                "Scroll down - it is all listed.",
+                "Just scroll down.",
+            ]
+            visual = "scrolling the page"
+        elif kind in ("reveal", "navigate"):
+            variants = (
+                ["The next screen loads instantly.", "The next screen loads."]
+                if kind == "navigate"
+                else ["Watch what shows up next.", "Watch this."]
+            )
+            visual = "the page updates"
+        elif near_text:
+            variants = [f"Look at {_shorten(near_text, 8)}.", f"Look at {_shorten(near_text, 4)}."]
+            visual = "content visible on screen"
+        else:
+            variants = ["Keep watching - this is the useful part.", "Keep watching."]
+            visual = "demonstration continues"
+        return _pick(variants, budget), visual, evidence
+
+    def _hook(self, site: str, facts: dict[str, Any], budget: int = 8) -> str:
+        headline = facts.get("headline") or ""
+        options: list[str] = []
+        if headline:
+            options.append(f"{_shorten(headline, 7)}? {site} does it for free.")
+        pool = [
+            f"Most students have never opened {site}.",
+            f"Here is what {site} really does.",
+            f"Save this one: {site}.",
+        ]
+        idx = abs(hash(site)) % len(pool) if site else 0
+        options += [pool[idx]] + pool + ["You need to see this."]
+        return _pick(options, budget)
+
+    # -------------------------------------------------------------- titles
+    def _title(self, site: str, facts: dict[str, Any]) -> str:
+        if facts.get("headline"):
+            return _title_case(_shorten(facts["headline"], 8))
+        if site:
+            return _title_case(f"{site} for students")
+        return _title_case(f"{self.brand} tool demo")
+
+    def _keywords(self, facts: dict[str, Any]) -> list[str]:
+        blob = " ".join((facts.get("texts") or [])[:12] + (facts.get("labels") or []))
+        blob = f"{blob} {facts.get('context', '')}"
+        return extract_keywords(blob, top_n=8) if blob.strip() else []
+
+    # ----------------------------------------------------------------- llm
+    def _polish(self, script: GroundedScript, facts: dict[str, Any], duration: float) -> GroundedScript | None:
+        lines = [s.text for s in script.segments]
+        fact_lines = []
+        for s in script.segments:
+            fact_lines.append(
+                f"- [{s.role} {s.start:.1f}-{s.end:.1f}s] visual: {s.visual_action or 'n/a'}; "
+                f"visible text: {'; '.join(s.evidence) or 'none recognised'}; current line: {s.text}"
+            )
+        system = self.SYSTEM_PROMPT.format(
+            brand=self.brand, duration=duration, max_words=max(8, int(self.config.speaking_rate_wps * 4))
+        )
+        user = (
+            f"Website: {script.website}\n"
+            f"Facts that may be mentioned: {', '.join((facts.get('texts') or [])[:20]) or 'none'}\n"
+            + (f"Operator-supplied context: {facts['context']}\n" if facts.get("context") else "")
+            + "Lines:\n"
+            + "\n".join(fact_lines)
+        )
+        data = self.llm.complete_json(system, user)
+        if not data or not isinstance(data.get("lines"), list):
+            return None
+        new_lines = [str(x).strip() for x in data["lines"]]
+        if len(new_lines) != len(lines):
+            log.warning("LLM returned %d lines for %d segments - keeping rule-based script", len(new_lines), len(lines))
+            return None
+        vocab = self._vocabulary(facts, script.website)
+        kept = 0
+        for seg, new in zip(script.segments, new_lines):
+            if not new:
+                continue
+            if self.config.strict_grounding and not _grounded_line(new, vocab):
+                continue
+            seg.text = new
+            kept += 1
+        script.source = f"grounded-llm:{self.llm.config.provider}"
+        script.notes.append(f"LLM polished {kept}/{len(lines)} lines (grounding-checked)")
+        return script
+
+    # ------------------------------------------------------------ degraded
+    def _minimal(self, site: str, duration: float, transcript_text: str, *, reason: str) -> GroundedScript:
+        """A short, clearly grounded script when there is nothing to look at."""
+        site_name = site or self.brand
+        duration = max(6.0, duration or 12.0)
+        pieces: list[tuple[str, str]] = [("hook", f"A quick look at {site_name}.")]
+        spoken = clean_transcript(transcript_text or "")
+        sentences = split_sentences(spoken)[:3]
+        for s in sentences:
+            pieces.append(("demo", _punctuate(s)))
+        if not sentences:
+            pieces.append(("demo", f"Here is {site_name} on screen, step by step."))
+        pieces.append(("cta", self.config.cta_default or f"Follow {self.brand} for more."))
+        slot = duration / len(pieces)
+        segments = [
+            ScriptSegment(
+                start=round(i * slot, 3),
+                end=round((i + 1) * slot, 3),
+                text=text,
+                role=role,
+                visual_action="recording (no visual analysis available)",
+                focus_region=None,
+                evidence=["transcript"] if role == "demo" and sentences else [],
+                source_start=round(i * slot, 3),
+                source_end=round((i + 1) * slot, 3),
+            )
+            for i, (role, text) in enumerate(pieces)
+        ]
+        script = GroundedScript(
+            title=_title_case(f"{site_name} quick look"),
+            segments=segments,
+            keywords=extract_keywords(spoken, top_n=6) if spoken else [],
+            website=site_name,
+            source="grounded-minimal",
+            grounded=True,
+            degraded=True,
+            notes=[f"minimal script: {reason}", "no features are claimed beyond what was recorded"],
+        )
+        log.warning("Grounded script degraded (%s) - %d minimal segments", reason, len(segments))
+        return script
+
+
+# ---------------------------------------------------------------- helpers
+_KIND_PRIORITY = ("click", "reveal", "navigate", "type", "scroll")
+
+
+def _dominant_kind(actions: list[ActionEvent]) -> str:
+    """The action a viewer would say the shot is about."""
+    kinds = {a.kind for a in actions}
+    for kind in _KIND_PRIORITY:
+        if kind in kinds:
+            return kind
+    return ""
+
+
+def _pick(variants: list[str], budget: int) -> str:
+    """Longest phrasing that still fits the spoken-word budget of the shot."""
+    for text in variants:
+        if text and len(text.split()) <= budget:
+            return text
+    shortest = min((v for v in variants if v), key=lambda v: len(v.split()), default="")
+    return _fit_line(shortest, budget)
+
+
+def _mergeable(prev: Beat, nxt: Beat) -> bool:
+    """Two consecutive shots share a narration line when they show the same idea."""
+    if prev.role != nxt.role:
+        return False
+    if prev.duration + nxt.duration > 6.0:
+        return False
+    prev_kinds = {a.kind for a in prev.actions}
+    next_kinds = {a.kind for a in nxt.actions}
+    if prev_kinds and next_kinds and prev_kinds != next_kinds:
+        return False
+    return prev.duration < 2.6 or not next_kinds
+
+
+def _budget_segments(script: GroundedScript, speaking_rate_wps: float) -> None:
+    """Shorten lines that cannot be spoken inside their own visual slot.
+
+    Speech is fitted again at synthesis time (atempo), so a slot may carry a
+    little more than its nominal word budget; what matters here is that no line
+    is so long that the narration drifts away from the picture.
+    """
+    for seg in script.segments:
+        if seg.role == "cta":
+            continue  # the call to action is brand copy: spoken slightly faster, never cut
+        budget = max(4, int(seg.duration * max(1.0, speaking_rate_wps) * 1.12))
+        seg.text = _fit_line(seg.text, budget)
+
+
+def _fit_line(text: str, budget: int) -> str:
+    """Shorten a line to ``budget`` words, cutting at a clause when possible."""
+    words = text.split()
+    if len(words) <= budget:
+        return text
+    for sep in (" - ", ", ", " and ", " so ", " that "):
+        head = text.split(sep)[0]
+        if head and len(head.split()) <= budget:
+            return _punctuate(head.strip(" .,:;-"))
+    return _punctuate(" ".join(words[:budget]).rstrip(",;:-"))
+
+
+def _grounded_line(line: str, vocabulary: set[str]) -> bool:
+    words = _content_words(line)
+    if not words:
+        return False
+    novel = [w for w in words if w not in vocabulary and not _is_generic(w)]
+    return len(novel) / len(words) <= 0.35
+
+
+def _shorten(text: str, max_words: int) -> str:
+    words = [w for w in text.split() if w.strip()]
+    return " ".join(words[:max_words]).strip(" .,:;-")
+
+
+def _first_sentence(text: str, max_words: int) -> str:
+    parts = split_sentences(text)
+    first = parts[0] if parts else text
+    return _punctuate(_shorten(first, max_words))
+
+
+def plan_grounded_script(
+    edit: EditPlan,
+    understanding: VideoUnderstanding | None,
+    config: ScriptConfig,
+    *,
+    brand: str = "StudentTools.pk",
+    website: str = "",
+    website_context: str = "",
+    transcript_text: str = "",
+    llm: LLMClient | None = None,
+) -> GroundedScript:
+    """Convenience wrapper used by the pipeline step."""
+    planner = GroundedScriptPlanner(config, brand=brand, llm=llm)
+    return planner.plan(
+        edit,
+        understanding,
+        website=website,
+        website_context=website_context,
+        transcript_text=transcript_text,
+    )

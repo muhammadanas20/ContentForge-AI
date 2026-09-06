@@ -50,10 +50,47 @@ Never put keys into YAML. Copy `.env.example` to `.env`:
 | `recursive` | false | Watch sub-folders |
 
 ### `pipeline`
+`mode` (**`smart`** = v0.3 understanding-driven Reel pipeline, `classic` = v0.2 transcript-driven pipeline),
 `max_workers` (parallel videos; 1 recommended on laptops), `retries` (per step), `retry_backoff_seconds`,
 `cleanup_work_on_success`, `delete_intermediates_early` (drop `cut.mp4`/`synced.mp4` as soon as they are superseded),
-`min_free_disk_gb_to_start` (refuse to start a job below this much free space; 0 = off), and `steps.*` boolean switches: `transcribe, script, narration, subtitles, silence_removal,
-jump_cuts, vertical_crop, auto_zoom, progress_bar, branding, thumbnail, social, analytics, package, archive`.
+`min_free_disk_gb_to_start` (refuse to start a job below this much free space; 0 = off), and `steps.*` boolean switches:
+smart - `understand, plan_edit, compose, captions, mix, cover, quality`;
+shared/classic - `transcribe, script, narration, subtitles, silence_removal, jump_cuts, vertical_crop, auto_zoom,
+progress_bar, branding, thumbnail, social, analytics, package, archive`.
+
+### `understanding` *(v0.3)*
+What the pipeline sees before it edits. `sample_fps` (6; the main CPU knob - 4 is faster, 8 catches more clicks),
+`work_width` (960; analysis resolution), `ocr_every_seconds` (1.0), `ocr_engine` (`auto|tesseract|heuristic`),
+`ocr_languages`, `max_frames` (hard cap for long recordings), `track_cursor`, `website_url` / `website_context`
+(grounding metadata; per job use `contentforge process ... --website studentofferco.com`).
+Without tesseract the heuristic backend returns text *regions* only - framing and the quality gates still work.
+
+### `framing` *(v0.3)*
+Content-aware 9:16 composition. `target_width/height`, `max_zoom` (3.6 hard cap on `source_width / view_width`),
+`canvas_bias` (how much the designed canvas layout may lose by before a destructive crop is chosen),
+`focus_boost` / `focus_falloff` (importance of text near the current action), `samples_per_shot`,
+`smoothing_deadzone` / `smoothing_ema` / `max_pan_per_second` (camera path), and `weights.*`
+(`text_kept, text_cut, cursor, action, prominence, content, legibility, zoom_penalty`).
+Raise `weights.text_cut` if headlines ever get sliced; lower `canvas_bias` for tighter, more zoomed framing.
+
+### `editing` *(v0.3)*
+`max_duration` (Reel budget), `min_shot` / `max_shot`, `remove_dead_time`, `min_dead_gap`, `dead_padding`,
+`max_speedup`, `dynamic_zoom` + `zoom_max` (1.07 = subtle push-in), the structure knobs
+`hook_seconds / setup_seconds / cta_seconds / payoff_fraction`, `result_hold` (hold on the result after it appears),
+`transitions`, `click_effects`, `click_sfx`, `card_offset`, `zoom_headroom`.
+
+### `reel_captions` *(v0.3)*
+Burned-in Reel captions: `font`, `font_size`, `outline`, `max_words` / `max_chars` per chunk, `highlight_color`,
+`text_color`, `safe_bottom` / `safe_top` (mobile UI safe areas), `word_level` (Whisper word timing when available,
+estimated otherwise), `hook_card`, `progress_bar`, `click_rings`.
+
+### `cover` *(v0.3)*
+`width`, `height`, `title_size`, `max_title_words`, `concepts` (`card`, `banner`, `split` - all are rendered
+internally and the best-measuring one is kept).
+
+### `quality` *(v0.3)*
+`enabled`, `block_on_error` (a failing Reel is never packaged), `min_text_keep`, `min_narration_coverage`,
+`narration_slack_seconds`, `min_duration` / `max_duration`, `max_peak_db`, `min_mean_db`.
 
 ### `audio`
 * `sample_rate`, `channels` - ASR extraction format.
@@ -72,9 +109,10 @@ jump_cuts, vertical_crop, auto_zoom, progress_bar, branding, thumbnail, social, 
 `strict_grounding` (reject LLM scripts that introduce too many words absent from the transcript).
 
 ### `tts`
-`engine` (`piper|kokoro|edge`), `speed`, `output_sample_rate`, plus per-engine blocks:
+`engine` (`piper|kokoro|edge|espeak`), `speed`, `output_sample_rate`, plus per-engine blocks:
 `piper.voice`, `piper.models_dir`, `piper.auto_download`, `piper.length_scale/noise_scale/noise_w`;
-`kokoro.voice`, `kokoro.lang_code`; `edge.voice`, `edge.rate`, `edge.pitch`.
+`kokoro.voice`, `kokoro.lang_code`; `edge.voice`, `edge.rate`, `edge.pitch`;
+`espeak.voice`, `espeak.words_per_minute` (offline fallback through `libespeak-ng`, no model download).
 If the configured engine is unavailable the next available one is used; if none is, the original audio is kept.
 
 ### `video`
