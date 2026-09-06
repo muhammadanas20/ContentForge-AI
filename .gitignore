@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+
+# Runtime data (media, models, db, logs) - never commit
+data/input/*
+data/output/*
+data/work/*
+data/archive/*
+data/logs/*
+data/models/*
+data/db/*
+!data/**/.gitkeep
+
+# Local config override
+config/config.local.yaml
+
+# OS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/

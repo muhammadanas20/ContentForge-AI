@@ -1,0 +1,13 @@
+# Alternative to the built-in APScheduler: system cron entries.
+# Install with:  crontab -e   (adjust paths)
+REPO=/home/you/ContentForge-AI
+# Process anything waiting in input/ every 2 hours (only if you don't run `contentforge run`)
+0 */2 * * *  cd $REPO && .venv/bin/contentforge -q process data/input/*.mp4 >> data/logs/cron.log 2>&1
+# Daily cleanup at 03:30
+30 3 * * *   cd $REPO && .venv/bin/contentforge -q cleanup >> data/logs/cron.log 2>&1
+# Weekly analytics report on Monday 09:00
+0 9 * * 1    cd $REPO && .venv/bin/contentforge -q analytics report --period weekly >> data/logs/cron.log 2>&1
+# Monthly report on the 1st
+0 9 1 * *    cd $REPO && .venv/bin/contentforge -q analytics report --period monthly >> data/logs/cron.log 2>&1
+# Nightly backup
+0 2 * * *    cd $REPO && scripts/backup.sh /backups >> data/logs/cron.log 2>&1
