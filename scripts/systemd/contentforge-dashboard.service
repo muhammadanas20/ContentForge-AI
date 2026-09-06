@@ -1,0 +1,14 @@
+[Unit]
+Description=ContentForge-AI Streamlit dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO__
+EnvironmentFile=-__REPO__/.env
+ExecStart=__REPO__/.venv/bin/contentforge dashboard
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

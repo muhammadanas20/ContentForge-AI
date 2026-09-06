@@ -1,0 +1,278 @@
+# =============================================================================
+# ContentForge-AI master configuration
+# -----------------------------------------------------------------------------
+# Every tunable value lives here. Override locally by creating
+# config/config.local.yaml (git-ignored); it is deep-merged on top of this file.
+# Environment variables of the form CONTENTFORGE__SECTION__KEY=value also
+# override (double underscore = nesting), e.g. CONTENTFORGE__TTS__ENGINE=piper
+# Secrets (API keys) are NEVER placed here - use .env / environment variables.
+# =============================================================================
+
+project:
+  name: "ContentForge-AI"
+  brand: "StudentTools.pk"
+  website: "StudentTools.pk"
+  timezone: "Asia/Karachi"
+
+paths:
+  data_dir: "data"              # relative to repo root unless absolute
+  input: "data/input"
+  work: "data/work"
+  output: "data/output"
+  archive: "data/archive"
+  logs: "data/logs"
+  assets: "data/assets"
+  models: "data/models"
+  db: "data/db/contentforge.sqlite3"
+
+watcher:
+  enabled: true
+  extensions: [".mp4", ".mkv", ".mov", ".webm", ".avi"]
+  # A file is considered "complete" once its size has not changed for this many seconds
+  stable_seconds: 5
+  poll_interval: 2
+  # Process existing files found in input/ on startup
+  process_existing_on_start: true
+  recursive: false
+
+pipeline:
+  # Max parallel videos. 1 is safest on a laptop (Whisper + FFmpeg are CPU-heavy)
+  max_workers: 1
+  # Retry policy for each step
+  retries: 2
+  retry_backoff_seconds: 5
+  # Delete per-video work directory after success
+  cleanup_work_on_success: true
+  # Steps that can be disabled without breaking the flow
+  steps:
+    transcribe: true
+    script: true
+    narration: true
+    subtitles: true
+    silence_removal: true
+    jump_cuts: true
+    vertical_crop: true
+    auto_zoom: true
+    progress_bar: true
+    branding: true
+    thumbnail: true
+    social: true
+    analytics: true
+    package: true
+    archive: true
+
+audio:
+  sample_rate: 16000     # for ASR
+  channels: 1
+  # Silence removal (applied to the ORIGINAL recording audio to find dead time)
+  silence:
+    threshold_db: -35
+    min_duration: 0.6      # seconds of silence before it is cut
+    keep_padding: 0.15     # keep this much silence on both sides of speech
+  # Final loudness normalisation (EBU R128)
+  loudness:
+    target_lufs: -14
+    true_peak: -1.5
+    lra: 11
+  # Mixing when narration is enabled
+  mix:
+    original_volume: 0.0   # 0 = mute the screen recording audio, 1 = keep it fully
+    narration_volume: 1.0
+    music_volume: 0.08
+    background_music: ""   # optional path to a royalty-free music file
+
+transcription:
+  engine: "faster-whisper"
+  model_size: "base"       # tiny | base | small | medium | large-v3
+  device: "cpu"            # cpu | cuda
+  compute_type: "int8"     # int8 | float16 | float32
+  language: "en"           # null = auto-detect
+  beam_size: 5
+  vad_filter: true
+  word_timestamps: true
+  download_root: "data/models/whisper"
+
+script:
+  # llm provider is read from env CONTENTFORGE_LLM_PROVIDER (none | openai | ollama)
+  style: "student-friendly"
+  target_words_min: 60
+  target_words_max: 140
+  max_duration_seconds: 60
+  hook_styles: ["question", "shock", "problem", "secret"]
+  cta_default: "Follow StudentTools.pk for more free student tools."
+  # Words per second used to estimate narration duration
+  speaking_rate_wps: 2.6
+  # Facts the script may mention are ONLY those in the transcript. Never invent features.
+  strict_grounding: true
+
+tts:
+  engine: "piper"          # piper | kokoro | edge
+  speed: 1.0
+  output_sample_rate: 24000
+  piper:
+    voice: "en_US-lessac-medium"
+    models_dir: "data/models/piper"
+    # Download automatically from HuggingFace if missing
+    auto_download: true
+    length_scale: 1.0
+    noise_scale: 0.667
+    noise_w: 0.8
+  kokoro:
+    voice: "af_heart"
+    lang_code: "a"
+  edge:
+    voice: "en-US-AriaNeural"
+    rate: "+5%"
+    pitch: "+0Hz"
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  crf: 20
+  preset: "medium"
+  pix_fmt: "yuv420p"
+  audio_bitrate: "192k"
+  max_duration_seconds: 90
+  crop:
+    mode: "smart"            # smart | center | left | right | blur-pad
+    # Smart crop analyses frame activity to find the region of interest
+    sample_fps: 2
+    smoothing: 0.85
+  zoom:
+    enabled: true
+    max_zoom: 1.12
+    # zoom in on every Nth sentence / every N seconds
+    interval_seconds: 6
+    duration_seconds: 2.5
+    ease: "in-out"
+  jump_cuts:
+    enabled: true
+    # Extra dead time (no speech, no motion) removed beyond silence trimming
+    min_gap_seconds: 1.2
+    motion_threshold: 2.0
+  transitions:
+    enabled: true
+    type: "fade"             # fade | none
+    duration: 0.08
+  progress_bar:
+    enabled: true
+    height: 14
+    color: "#FF7A00"
+    background: "#00000080"
+    position: "top"          # top | bottom
+  branding:
+    enabled: true
+    watermark_text: "StudentTools.pk"
+    watermark_position: "top-right"   # top-left | top-right | bottom-left | bottom-right
+    watermark_opacity: 0.85
+    font_size: 38
+    logo_path: ""            # optional PNG in data/assets
+    logo_width: 180
+    intro_title: true        # show hook text card in first ~2 seconds
+    outro_cta: true          # show CTA card in last ~2.5 seconds
+    primary_color: "#FF7A00"
+    secondary_color: "#FFFFFF"
+    background_color: "#0F0F14"
+
+subtitles:
+  enabled: true
+  style: "bold-pop"          # bold-pop | clean | karaoke | minimal
+  font: "DejaVu Sans"
+  font_size: 68
+  max_chars_per_line: 22
+  max_words_per_caption: 4
+  position_v: 0.72           # 0 = top, 1 = bottom (fraction of height)
+  primary_color: "#FFFFFF"
+  highlight_color: "#FFD400"
+  outline_color: "#000000"
+  outline_width: 5
+  shadow: 2
+  # Words that get highlighted automatically (plus AI-detected keywords)
+  highlight_keywords: ["free", "students", "tool", "website", "secret", "hack", "instantly", "ai", "save", "time"]
+  uppercase: true
+  formats: ["srt", "ass", "json", "txt"]
+
+thumbnail:
+  enabled: true
+  width: 1080
+  height: 1920
+  # Frame position (fraction of duration) to use as background
+  frame_position: 0.25
+  overlay_title: true
+  font: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+  title_font_size: 96
+  dark_overlay_alpha: 0.45
+  accent_color: "#FF7A00"
+  text_color: "#FFFFFF"
+  # Also emit a Canva-friendly brief (prompt + text suggestions + colors)
+  canva_brief: true
+
+social:
+  platform_defaults: ["instagram", "youtube_shorts"]
+  caption_max_length: 2200
+  hashtags:
+    count: 18
+    # categories drawn from: brand, students, pakistan, productivity, tech, education, viral
+    categories: ["brand", "students", "pakistan", "productivity", "education", "viral"]
+    banned: []
+    # Rotate hashtag sets so consecutive posts never repeat the same block
+    rotation_memory: 5
+  cta_variants:
+    - "Follow @StudentTools.pk for more free tools."
+    - "Save this before your next assignment."
+    - "Share this with a classmate who needs it."
+    - "Comment TOOL and I'll send you the link."
+  comment_prompts:
+    - "Which tool should I review next?"
+    - "Have you tried this before? Tell me below."
+    - "Drop your university name if this helped."
+
+analytics:
+  enabled: true
+  # Performance thresholds used for suggestions
+  benchmarks:
+    completion_rate_good: 0.55
+    completion_rate_poor: 0.30
+    like_rate_good: 0.06
+    share_rate_good: 0.01
+    comment_rate_good: 0.005
+  report_dir: "data/output/reports"
+
+cleanup:
+  enabled: true
+  delete_raw_after_success: false
+  delete_temp_after_success: true
+  archive_retention_days: 30
+  output_retention_days: 0            # 0 = keep forever
+  min_free_disk_gb: 5
+  # Never touch jobs younger than this (safety for in-flight work)
+  min_age_minutes: 30
+  logs_retention_days: 30
+
+scheduler:
+  enabled: true
+  mode: "immediate"                   # immediate | scheduled
+  # cron-style; used only when mode == scheduled (process the queue at these times)
+  process_cron: "0 */2 * * *"
+  daily_cleanup_cron: "30 3 * * *"
+  weekly_analytics_cron: "0 9 * * 1"
+  monthly_report_cron: "0 9 1 * *"
+
+database:
+  # sqlite (default) or postgres. Postgres URL from env CONTENTFORGE_DATABASE_URL.
+  backend: "sqlite"
+
+logging:
+  level: "INFO"
+  console: true
+  rich_tracebacks: true
+  file_rotation: "daily"
+  retention_days: 30
+  json_lines: false
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8501
+  refresh_seconds: 10
+  log_tail_lines: 200

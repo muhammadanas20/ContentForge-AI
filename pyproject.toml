@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contentforge-ai"
+version = "0.1.0"
+description = "AI Content Factory: turn raw screen recordings into publish-ready Instagram Reels and Shorts for StudentTools.pk"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "StudentTools.pk" }]
+keywords = ["ffmpeg", "whisper", "tts", "instagram", "reels", "shorts", "automation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "watchdog>=3.0",
+    "apscheduler>=3.10,<4",
+    "pillow>=10.0",
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+    "faster-whisper>=1.0",
+    "psutil>=5.9",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+tts = ["piper-tts>=1.2", "edge-tts>=6.1", "kokoro>=0.9", "soundfile>=0.12"]
+dashboard = ["streamlit>=1.30", "pandas>=2.0"]
+postgres = ["sqlalchemy>=2.0", "psycopg2-binary>=2.9"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.3"]
+all = ["contentforge-ai[tts,dashboard,postgres,dev]"]
+
+[project.scripts]
+contentforge = "contentforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["contentforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "ffmpeg: tests that require the ffmpeg binary",
+    "slow: slow tests (model downloads, full renders)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]
+ignore = ["E501", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E702"]
