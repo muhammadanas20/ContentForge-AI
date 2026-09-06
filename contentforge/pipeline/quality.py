@@ -24,7 +24,7 @@ from contentforge.models.schemas import (
     VideoUnderstanding,
 )
 from contentforge.processing.editor import RenderSettings, source_point_to_output
-from contentforge.processing.framing import preservation_report
+from contentforge.processing.framing import FramingConfig, preservation_report, weight_by_focus
 from contentforge.utils.ffmpeg import FFmpeg
 
 log = get_logger("quality")
@@ -116,12 +116,21 @@ class QualityGate:
         if plan is not None and understanding is not None:
             worst = 1.0
             worst_shot = -1
+            fcfg = FramingConfig(min_text_keep=self.t.min_text_keep)
             for shot in plan.shots:
-                boxes = understanding.text_boxes_at((shot.src_start + shot.src_end) / 2, window=1.5)
+                mid = (shot.src_start + shot.src_end) / 2
+                boxes = understanding.text_boxes_at(mid, window=1.5)
                 if not boxes:
                     continue
+                actions = [
+                    r for r in understanding.important_regions(shot.src_start, shot.src_end)
+                    if r.kind == "action"
+                ]
+                cur = understanding.cursor_at(mid)
+                cursor = (cur.x, cur.y) if cur is not None and cur.detected else None
+                focused_boxes = weight_by_focus(boxes, actions, cursor, fcfg)
                 view = shot.view_at_output(shot.out_start + shot.out_duration / 2)
-                rep = preservation_report(view, boxes, min_keep=self.t.min_text_keep)
+                rep = preservation_report(view, focused_boxes, min_keep=self.t.min_text_keep)
                 if rep["kept"] < worst:
                     worst, worst_shot = rep["kept"], shot.index
             r.add(

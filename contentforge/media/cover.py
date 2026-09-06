@@ -150,6 +150,22 @@ class CoverGenerator:
         headline = _hook_text(script, headline, self.st.max_title_words)
         sub = subtitle or (script.website if script else "")
 
+        # Optional Canva Connect API cover generation
+        try:
+            from contentforge.integrations.canva import CanvaClient, detect_canva_capability
+            canva_cap = detect_canva_capability()
+            if canva_cap.can_generate_covers and frame_path.exists():
+                client = CanvaClient()
+                canva_out = work / "cover_canva.png"
+                res = client.generate_cover(frame_path, headline, sub, canva_out)
+                if res and canva_out.exists():
+                    log.info("Rendered cover via Canva Connect API")
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    Image.open(canva_out).convert("RGB").save(dst, quality=95)
+                    return CoverResult(dst, t, "canva_connect", candidates, {"canva_connect": 1.0}, headline)
+        except Exception as exc:
+            log.warning("Canva cover generation attempt failed: %s - using Pillow fallback", exc)
+
         focus = None
         if understanding is not None:
             focus = understanding.content_region

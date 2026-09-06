@@ -256,11 +256,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"[{'green]✔' if free > s.cleanup.min_free_disk_gb else 'red]✘'}[/] Free disk: {free:.1f} GB "
         f"(minimum {s.cleanup.min_free_disk_gb} GB)"
     )
-    provider = os.environ.get("CONTENTFORGE_LLM_PROVIDER", "none")
-    console.print(
-        f"[green]✔[/green] LLM provider: {provider}"
-        + (" (rule-based script writer)" if provider == "none" else "")
-    )
+    provider = os.environ.get("CONTENTFORGE_LLM_PROVIDER", "none").strip().lower()
+    if provider == "none":
+        console.print("[green]✔[/green] LLM provider: none (deterministic rule-based script writer)")
+    else:
+        from contentforge.ai.llm import LLMClient
+        client = LLMClient()
+        if not client.enabled:
+            console.print(f"[red]✘[/red] LLM provider: {provider} - API key missing in .env")
+        else:
+            try:
+                ping = client.complete("You are a test helper.", "Reply with 'OK'.")
+                if ping:
+                    console.print(f"[green]✔[/green] LLM provider: {provider} ({client.config.model}) - API connected and working")
+                else:
+                    console.print(f"[yellow]![/yellow] LLM provider: {provider} ({client.config.model}) - connection test failed (will fall back to rule-based)")
+            except Exception as exc:
+                console.print(f"[yellow]![/yellow] LLM provider: {provider} ({client.config.model}) - check error: {exc}")
     console.print(f"[green]✔[/green] Input folder: {s.paths.input}")
     return 0 if ok else 1
 
@@ -295,6 +307,116 @@ def cmd_config(args: argparse.Namespace) -> int:
     if args.section:
         data = data.get(args.section, {})
     console.print_json(json.dumps(data, default=str))
+    return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    s = _settings(args)
+    from contentforge.db import Database
+
+    db = Database(s.paths.db)
+    job = db.get_job(args.job_id)
+    if not job:
+        console.print(f"[red]Job '{args.job_id}' not found.[/red]")
+        return 1
+
+    console.print(f"[bold cyan]Job Inspection: {job['id']}[/bold cyan] ({job.get('slug', 'n/a')})")
+    console.print(f"  Status: [green]{job.get('status')}[/green] | Duration: {job.get('duration_seconds', 0):.1f}s")
+
+    work_dir = s.paths.work / job["id"]
+    state_file = work_dir / "state.json"
+    if state_file.exists():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        console.print(f"  Completed steps ({len(state.get('completed_steps', []))}): {', '.join(state.get('completed_steps', []))}")
+        artifacts = state.get("artifacts", {})
+        console.print(f"  Artifacts ({len(artifacts)}):")
+        for k, v in artifacts.items():
+            exists = Path(v).exists()
+            mark = "[green]✔[/green]" if exists else "[red]✘[/red]"
+            console.print(f"    {mark} {k}: {v}")
+
+    cp_file = work_dir / "creative_plan.json"
+    if cp_file.exists():
+        cp = json.loads(cp_file.read_text(encoding="utf-8"))
+        console.print(f"\n[bold yellow]Creative Plan[/bold yellow] (source: {cp.get('source')}, confidence: {cp.get('confidence', 0):.2f}):")
+        console.print(f"  Concept: {cp.get('concept')}")
+        console.print(f"  Hook style: {cp.get('hook_style')}")
+        console.print(f"  Music: {cp.get('music_mood')} (energy: {cp.get('music_energy')})")
+        console.print(f"  Layout: {cp.get('layout_preference')}")
+
+    cs_file = work_dir / "creative_score.json"
+    if cs_file.exists():
+        cs = json.loads(cs_file.read_text(encoding="utf-8"))
+        console.print(f"\n[bold magenta]Creative Scores[/bold magenta] (overall: [bold]{cs.get('overall', 0):.2f}[/bold]):")
+        for dim, val in cs.items():
+            if dim != "overall" and isinstance(val, (int, float)):
+                console.print(f"  {dim:22s}: {val:.2f}")
+
+    return 0
+
+
+def cmd_quality(args: argparse.Namespace) -> int:
+    s = _settings(args)
+    work_dir = s.paths.work / args.job_id
+    q_file = work_dir / "quality.json"
+    if not q_file.exists():
+        console.print(f"[red]Quality report for '{args.job_id}' not found at {q_file}[/red]")
+        return 1
+    q = json.loads(q_file.read_text(encoding="utf-8"))
+    status_str = "[bold green]PASSED[/bold green]" if q.get("passed") else "[bold red]FAILED[/bold red]"
+    console.print(f"\n{status_str}: {q.get('summary', '')}")
+    table = Table(title="Quality Gates")
+    table.add_column("Check", style="cyan")
+    table.add_column("Result")
+    table.add_column("Detail", style="dim")
+    for c in q.get("checks", []):
+        res = "[green]PASS[/green]" if c.get("passed") else ("[red]FAIL[/red]" if c.get("severity") == "error" else "[yellow]WARN[/yellow]")
+        table.add_row(c.get("name", ""), res, c.get("detail", ""))
+    console.print(table)
+    return 0
+
+
+def cmd_music(args: argparse.Namespace) -> int:
+    s = _settings(args)
+    from contentforge.media.music import MusicCatalog
+
+    catalog = MusicCatalog(s.paths.assets / "music")
+    tracks = catalog.list_tracks()
+    console.print(f"[cyan]Music Catalog ({len(tracks)} tracks registered):[/cyan]")
+    for t in tracks:
+        console.print(f"  • [bold]{t.title}[/bold] by {t.artist or 'Unknown'} [{t.license}] - mood: {', '.join(t.mood)}")
+    if not tracks:
+        console.print("  (Empty catalog. Place audio files in data/assets/music/ and register in catalog.json)")
+    return 0
+
+
+def cmd_canva(args: argparse.Namespace) -> int:
+    from contentforge.integrations.canva import detect_canva_capability
+
+    cap = detect_canva_capability()
+    console.print("[bold cyan]Canva Connect Integration Status:[/bold cyan]")
+    status_str = "[green]Ready[/green]" if cap.can_generate_covers else "[yellow]Offline / Fallback (Pillow)[/yellow]"
+    console.print(f"  Integration: {status_str}")
+    console.print(f"  Configured: {cap.configured}")
+    console.print(f"  Has Credentials: {cap.has_credentials}")
+    console.print(f"  Has Access Token: {cap.has_token}")
+    console.print(f"  Status: {cap.reason}")
+    return 0
+
+
+def cmd_templates(args: argparse.Namespace) -> int:
+    import yaml
+
+    raw = yaml.safe_load(Path("config/config.yaml").read_text(encoding="utf-8")) if Path("config/config.yaml").exists() else {}
+    presets = raw.get("presets", {})
+    console.print(f"[bold cyan]Available Creative Presets ({len(presets)}):[/bold cyan]\n")
+    for name, p in presets.items():
+        cr = p.get("creative", {})
+        console.print(f"  • [bold green]{name}[/bold green]")
+        if "hook_style" in cr:
+            console.print(f"      Hook: {cr.get('hook_style')} | Mood: {cr.get('music_mood')} | Intensity: {cr.get('editing_intensity')}")
+        if "subtitles" in p:
+            console.print(f"      Captions style: {p.get('subtitles', {}).get('style')}")
     return 0
 
 
@@ -378,6 +500,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("config", help="print the effective configuration")
     sp.add_argument("section", nargs="?")
     sp.set_defaults(fn=cmd_config)
+
+    sp = sub.add_parser("inspect", help="inspect a job's artifacts, creative plan, and state")
+    sp.add_argument("job_id", help="job identifier")
+    sp.set_defaults(fn=cmd_inspect)
+
+    sp = sub.add_parser("quality", help="view quality gates and creative scores for a job")
+    sp.add_argument("job_id", help="job identifier")
+    sp.set_defaults(fn=cmd_quality)
+
+    sp = sub.add_parser("music", help="list or manage background music tracks")
+    sp.set_defaults(fn=cmd_music)
+
+    sp = sub.add_parser("canva", help="check Canva Connect integration status")
+    sp.set_defaults(fn=cmd_canva)
+
+    sp = sub.add_parser("templates", help="list creative presets and styling options")
+    sp.set_defaults(fn=cmd_templates)
     return p
 
 

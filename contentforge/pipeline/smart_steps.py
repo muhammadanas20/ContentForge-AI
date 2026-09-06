@@ -18,10 +18,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from contentforge.ai.llm import LLMClient
 from contentforge.ai.narration import NarrationBuilder, NarrationResult, NarrationSegment
 from contentforge.ai.script_writer import GroundedScriptPlanner
 from contentforge.ai.tts import TTSError, get_tts_engine
 from contentforge.config.schema import Settings
+from contentforge.creative.director import CreativeDirector, CreativePlan
 from contentforge.log import get_logger
 from contentforge.media.audio import ReelAudioMixer
 from contentforge.media.captions import (
@@ -32,8 +34,10 @@ from contentforge.media.captions import (
     build_overlay_plan,
 )
 from contentforge.media.cover import CoverGenerator, CoverStyle
+from contentforge.media.music import MusicCatalog
 from contentforge.models.schemas import EditPlan, GroundedScript, VideoUnderstanding
 from contentforge.pipeline.context import JobContext
+from contentforge.pipeline.creative_qa import CreativeQA
 from contentforge.pipeline.quality import QualityGate, QualityThresholds
 from contentforge.pipeline.steps import (
     AnalyticsInitStep,
@@ -76,6 +80,7 @@ def framing_config(s: Settings) -> FramingConfig:
         deadzone=f.smoothing_deadzone,
         smoothing=f.smoothing_ema,
         max_pan_per_second=f.max_pan_per_second,
+        min_text_keep=s.quality.min_text_keep,
         weights=FramingWeights(
             text_kept=w.text_kept,
             text_cut=w.text_cut,
@@ -256,6 +261,56 @@ class UnderstandStep(Step):
         return summary
 
 
+def load_creative_plan(ctx: JobContext) -> CreativePlan | None:
+    p = ctx.artifact("creative_plan_json")
+    if p and Path(p).exists():
+        try:
+            return CreativePlan.from_dict(json.loads(Path(p).read_text(encoding="utf-8")))
+        except Exception:
+            return None
+    data = ctx.data.get("creative_plan")
+    if isinstance(data, dict):
+        try:
+            return CreativePlan.from_dict(data)
+        except Exception:
+            return None
+    return None
+
+
+class CreativeDirectorStep(Step):
+    """Unified AI Creative Director: produces the master CreativePlan.
+
+    Shapes narrative arc, hook candidates, pacing, layout preference,
+    music mood, captions style, and cover design before rendering begins.
+    """
+
+    name = "creative_director"
+
+    def run(self, ctx: JobContext) -> dict[str, Any]:
+        u = load_understanding(ctx)
+        website = ctx.data.get("website_hint") or self.settings.understanding.website_url
+        context = ctx.data.get("website_context") or self.settings.understanding.website_context
+        director = CreativeDirector(
+            brand=getattr(self.settings.project, "brand", "StudentTools.pk"),
+            llm=LLMClient(),
+        )
+        plan = director.plan(u, website=website, website_context=context)
+        atomic_write_json(ctx.path("creative_plan.json"), plan.to_dict())
+        atomic_write_text(ctx.path("creative_plan.md"), plan.to_markdown())
+        ctx.set_artifact("creative_plan_json", ctx.path("creative_plan.json"))
+        ctx.set_artifact("creative_plan_md", ctx.path("creative_plan.md"))
+        ctx.data["creative_plan"] = plan.to_dict()
+        log.info(
+            "Creative Plan produced (source=%s, confidence=%.2f): concept='%s', hook_style=%s, mood=%s",
+            plan.source,
+            plan.confidence,
+            plan.concept,
+            plan.hook_style,
+            plan.music_mood,
+        )
+        return plan.to_dict()
+
+
 class PlanEditStep(Step):
     """Decide what to keep, where to cut and how to frame every shot."""
 
@@ -320,6 +375,7 @@ class GroundedScriptStep(Step):
             except (OSError, ValueError):
                 transcript_text = ""
         website = ctx.data.get("website_hint") or s.understanding.website_url
+        creative_plan = load_creative_plan(ctx)
         planner = GroundedScriptPlanner(s.script, brand=s.project.brand)
         script = planner.plan(
             plan,
@@ -327,6 +383,7 @@ class GroundedScriptStep(Step):
             website=website,
             website_context=ctx.data.get("website_context") or s.understanding.website_context,
             transcript_text=transcript_text,
+            creative_plan=creative_plan,
         )
         atomic_write_json(ctx.path("grounded_script.json"), script.to_dict())
         atomic_write_text(ctx.path("script.md"), script.to_markdown())
@@ -492,9 +549,29 @@ class MixStep(Step):
         s = self.settings
         duration = float(ctx.data.get("final_duration") or 0.0)
         overlay = load_overlay(ctx)
+        cp = load_creative_plan(ctx)
         music = Path(s.audio.mix.background_music) if s.audio.mix.background_music else None
         if music and not music.is_absolute():
             music = s.paths.assets / music
+        if (not music or not music.exists()) and s.audio.mix.music_volume > 0:
+            try:
+                catalog = MusicCatalog(s.paths.assets / "music")
+                mood = cp.music_mood if cp else "tech"
+                energy = cp.music_energy if cp else 0.6
+                selection = catalog.select(mood=mood, target_energy=energy)
+                if selection.track:
+                    track_path = catalog.resolve_path(selection.track)
+                    if track_path and track_path.exists():
+                        music = track_path
+                        log.info(
+                            "Selected background music: '%s' by %s (%s, match=%.2f)",
+                            selection.track.title,
+                            selection.track.artist,
+                            selection.track.license,
+                            selection.mood_match,
+                        )
+            except Exception as exc:
+                log.warning("Music catalog selection error: %s", exc)
         narration = ctx.artifact("narration")
         original = ctx.artifact("source_audio") if s.audio.mix.original_volume > 0 else None
         mixer = ReelAudioMixer(s.audio, self.ff)
@@ -639,6 +716,25 @@ class QualityStep(Step):
         ctx.set_artifact("quality_json", ctx.path("quality.json"))
         ctx.set_artifact("quality_md", ctx.path("quality.md"))
         ctx.data["quality"] = report.to_dict()
+
+        # Creative QA scoring (artistic & retention metrics)
+        try:
+            creative_qa = CreativeQA()
+            dur = float((ctx.data.get("final") or {}).get("duration") or ctx.data.get("final_duration") or 0.0)
+            overlay = load_overlay(ctx)
+            score = creative_qa.evaluate(
+                plan=load_plan(ctx),
+                understanding=load_understanding(ctx),
+                script=load_grounded_script(ctx),
+                caption_count=len(overlay.chunks) if overlay else 0,
+                duration=dur,
+            )
+            ctx.data["creative_score"] = score.to_dict()
+            atomic_write_json(ctx.path("creative_score.json"), score.to_dict())
+            ctx.set_artifact("creative_score_json", ctx.path("creative_score.json"))
+        except Exception as exc:
+            log.warning("Creative QA evaluation failed: %s", exc)
+
         for c in report.errors:
             self.db.add_event("error", f"Quality gate failed: {c.name} - {c.detail}", ctx.job_id)
         for c in report.warnings:
@@ -661,6 +757,7 @@ SMART_STEPS: list[type[Step]] = [
     ProbeStep,
     ExtractAudioStep,
     UnderstandStep,
+    CreativeDirectorStep,
     TranscribeStep,
     PlanEditStep,
     GroundedScriptStep,

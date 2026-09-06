@@ -249,6 +249,7 @@ class FrameObservation:
     text_boxes: list[TextBox] = field(default_factory=list)
     text_mass: float = 0.0  # fraction of the frame covered by text-like content
     sharpness: float = 0.0
+    semantic_description: str = ""
 
     @property
     def text(self) -> str:
@@ -269,6 +270,8 @@ class FrameObservation:
             d["cursor"] = self.cursor.to_dict()
         if self.text_boxes:
             d["text_boxes"] = [b.to_dict() for b in self.text_boxes]
+        if self.semantic_description:
+            d["semantic_description"] = self.semantic_description
         return d
 
     @classmethod
@@ -283,6 +286,7 @@ class FrameObservation:
             text_boxes=[TextBox.from_dict(b) for b in d.get("text_boxes", [])],
             text_mass=float(d.get("text_mass", 0.0)),
             sharpness=float(d.get("sharpness", 0.0)),
+            semantic_description=str(d.get("semantic_description", "")),
         )
 
 
@@ -348,6 +352,7 @@ class VideoUnderstanding:
     website: str = ""
     website_context: str = ""
     notes: list[str] = field(default_factory=list)
+    ai_insights: list[str] = field(default_factory=list)
 
     # ---- convenience -------------------------------------------------------
     @property
@@ -436,7 +441,7 @@ class VideoUnderstanding:
         for a in self.actions:
             counts[a.kind] = counts.get(a.kind, 0) + 1
         tracked = sum(1 for f in self.frames if f.cursor.detected)
-        return {
+        out = {
             "frames": len(self.frames),
             "duration": round(self.duration, 2),
             "sample_fps": round(self.sample_fps, 2),
@@ -448,6 +453,9 @@ class VideoUnderstanding:
             "content_region": self.content_region.to_dict(),
             "website": self.website,
         }
+        if self.ai_insights:
+            out["ai_insights"] = list(self.ai_insights)
+        return out
 
     def to_dict(self, *, include_frames: bool = True) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -463,6 +471,8 @@ class VideoUnderstanding:
             "website_context": self.website_context,
             "notes": self.notes,
         }
+        if self.ai_insights:
+            d["ai_insights"] = list(self.ai_insights)
         if include_frames:
             d["frames"] = [f.to_dict() for f in self.frames]
         return d
@@ -479,6 +489,7 @@ class VideoUnderstanding:
             website=str(d.get("website", "")),
             website_context=str(d.get("website_context", "")),
             notes=list(d.get("notes", [])),
+            ai_insights=list(d.get("ai_insights", [])),
         )
         u.content_region = Region.from_dict(d.get("content_region")) or Region(
             0, 0, 1, 1, kind="content"
@@ -974,3 +985,21 @@ class QualityReport:
             mark = "pass" if c.passed else ("FAIL" if c.severity == "error" else "warn")
             lines.append(f"| {c.name} | {mark} | {c.detail} |")
         return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Re-exports for v0.4 creative intelligence dataclasses
+# ---------------------------------------------------------------------------
+def _lazy_reexports():
+    try:
+        from contentforge.creative.director import CreativePlan
+    except ImportError:
+        CreativePlan = None  # type: ignore
+    try:
+        from contentforge.pipeline.creative_qa import EditingScore
+    except ImportError:
+        EditingScore = None  # type: ignore
+    return CreativePlan, EditingScore
+
+
+CreativePlan, EditingScore = _lazy_reexports()

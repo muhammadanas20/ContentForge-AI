@@ -59,6 +59,8 @@ def understand_video(
     scene_change_motion: float = 12.0,
     idle_motion: float = 1.2,
     min_idle_seconds: float = 0.8,
+    enrich_vision: bool = False,
+    llm_client: Any = None,
 ) -> VideoUnderstanding:
     """Analyse ``path`` and return everything the pipeline knows about it."""
     cap = cv2.VideoCapture(str(path))
@@ -151,6 +153,8 @@ def understand_video(
     u.actions = build_action_timeline(
         u, idle_motion=idle_motion, min_idle_seconds=min_idle_seconds
     )
+    if enrich_vision:
+        enrich_with_vision(u, path, llm=llm_client)
     log.info(
         "Understanding: %d frames @%.1f fps, OCR=%s (%s), %d actions, content=%s",
         len(u.frames),
@@ -450,3 +454,107 @@ def important_text_boxes(u: VideoUnderstanding, t: float, window: float = 1.5) -
     """Text boxes near ``t``, largest first - what framing must try to preserve."""
     boxes = u.text_boxes_at(t, window)
     return sorted(boxes, key=lambda b: -(b.region.area * max(0.2, b.confidence)))
+
+
+# --------------------------------------------------------------------------- AI vision enrichment
+def enrich_with_vision(
+    u: VideoUnderstanding,
+    path: str | Path,
+    llm: Any = None,
+    max_keyframes: int = 4,
+) -> VideoUnderstanding:
+    """Optionally query Gemini Vision with keyframes from the recording.
+
+    Enriches the understanding with AI insights, semantic frame descriptions,
+    and higher-level context. Gracefully no-ops if no vision-capable LLM is configured.
+    """
+    if llm is None:
+        try:
+            from contentforge.ai.llm import LLMClient
+            llm = LLMClient()
+        except Exception:
+            return u
+
+    if not getattr(llm, "supports_vision", False):
+        return u
+
+    if not u.frames or u.duration <= 0:
+        return u
+
+    timestamps: list[float] = [min(0.5, u.duration * 0.1)]
+    for a in u.actions:
+        if a.kind in ("click", "type", "reveal", "navigate") and a.confidence >= 0.5:
+            if not any(abs(a.mid - t) < 1.5 for t in timestamps):
+                timestamps.append(a.mid)
+        if len(timestamps) >= max_keyframes - 1:
+            break
+    end_t = max(0.0, u.duration - 1.0)
+    if not any(abs(end_t - t) < 1.5 for t in timestamps):
+        timestamps.append(end_t)
+    timestamps = sorted(timestamps)[:max_keyframes]
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return u
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    encoded_frames: list[bytes] = []
+    actual_ts: list[float] = []
+
+    for t in timestamps:
+        frame_idx = int(round(t * fps))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+        h, w = frame.shape[:2]
+        if w > 960:
+            scale = 960 / w
+            frame = cv2.resize(frame, (960, max(1, int(h * scale))))
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ok:
+            encoded_frames.append(buf.tobytes())
+            actual_ts.append(t)
+    cap.release()
+
+    if not encoded_frames:
+        return u
+
+    system_prompt = (
+        "You are an expert AI video analyst for short-form video production (Instagram Reels). "
+        "Analyze these sequential keyframes from a screen recording of a website or web app. "
+        "Respond strictly with valid JSON conforming to this schema:\n"
+        "{\n"
+        '  "summary": "1-2 sentence description of what this website/tool does and the user journey shown",\n'
+        '  "insights": ["3-5 punchy value propositions or key features visible"],\n'
+        '  "frame_descriptions": [\n'
+        '    {"timestamp": 0.5, "description": "Brief description of this screen state"}\n'
+        "  ]\n"
+        "}"
+    )
+    user_prompt = (
+        f"Website hint: {u.website or 'Unknown'}\n"
+        f"Detected text highlights: {', '.join(u.dominant_texts(6))}\n"
+        f"Keyframe timestamps: {actual_ts}"
+    )
+
+    try:
+        data = llm.complete_vision_json(system_prompt, user_prompt, encoded_frames)
+        if isinstance(data, dict):
+            if "summary" in data and isinstance(data["summary"], str):
+                u.notes.append(f"AI Summary: {data['summary']}")
+            if "insights" in data and isinstance(data["insights"], list):
+                u.ai_insights.extend(str(x) for x in data["insights"] if x)
+            if "frame_descriptions" in data and isinstance(data["frame_descriptions"], list):
+                for fd in data["frame_descriptions"]:
+                    if isinstance(fd, dict) and "description" in fd:
+                        ts = float(fd.get("timestamp", 0.0))
+                        desc = str(fd["description"]).strip()
+                        target_f = u.frame_at(ts)
+                        if target_f and desc:
+                            target_f.semantic_description = desc
+            log.info("Gemini Vision enriched video understanding with %d insights", len(u.ai_insights))
+    except Exception as exc:
+        log.warning("Gemini Vision enrichment encountered error: %s", exc)
+
+    return u

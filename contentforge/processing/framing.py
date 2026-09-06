@@ -67,6 +67,7 @@ class FramingConfig:
     deadzone: float = 0.06  # ignore tiny corrections
     samples_per_shot: int = 7
     weights: FramingWeights = field(default_factory=FramingWeights)
+    min_text_keep: float = 0.55
 
     @property
     def target_aspect(self) -> float:
@@ -352,9 +353,11 @@ def plan_framing(
         candidates = filtered or candidates
 
     # ---- 1. choose the size/layout that wins on average over the shot
-    scored: list[tuple[float, str, float, float]] = []
+    scored: list[tuple[float, str, float, float, float]] = []
     for layout, vw, vh in candidates:
         totals = 0.0
+        kept_totals = 0.0
+        has_boxes = 0
         for s in per_time:
             _, sc = best_position(
                 (vw, vh),
@@ -367,12 +370,24 @@ def plan_framing(
                 source_width=sw,
             )
             totals += sc.total
+            if s["boxes"]:
+                kept_totals += sc.text_kept
+                has_boxes += 1
         avg = totals / len(per_time)
         if layout == "canvas":
             avg -= cfg.canvas_bias  # fill (full-bleed) is the default look
-        scored.append((avg, layout, vw, vh))
-    scored.sort(key=lambda c: -c[0])
-    _, layout, vw, vh = scored[0]
+        avg_kept = (kept_totals / has_boxes) if has_boxes else 1.0
+        scored.append((avg, layout, vw, vh, avg_kept))
+
+    # Prioritize candidates meeting the quality gate threshold for text preservation
+    meeting_threshold = [c for c in scored if c[4] >= cfg.min_text_keep]
+    if meeting_threshold:
+        meeting_threshold.sort(key=lambda c: -c[0])
+        _, layout, vw, vh, _ = meeting_threshold[0]
+    else:
+        # If no candidate meets the threshold, fall back to the one that preserves the most text
+        scored.sort(key=lambda c: (-c[4], -c[0]))
+        _, layout, vw, vh, _ = scored[0]
 
     # ---- 2. best position at every sample time, then smooth into a camera path
     raw: list[tuple[float, float, float, ViewScore]] = []

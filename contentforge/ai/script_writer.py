@@ -351,6 +351,75 @@ def _build_hook(style: str, topic: str, website: str | None) -> str:
     return hooks.get(style, hooks["problem"])
 
 
+@dataclass
+class HookCandidate:
+    style: str
+    text: str
+    score: float = 0.0
+    scores: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "style": self.style,
+            "text": self.text,
+            "score": round(self.score, 3),
+            "scores": {k: round(v, 3) for k, v in self.scores.items()},
+        }
+
+
+def score_hook(text: str, topic: str = "", website: str | None = None) -> dict[str, float]:
+    """Score a hook on retention potential (0.0-1.0)."""
+    words = text.split()
+    length = len(words)
+    # 1. Length/conciseness (ideal 6-12 words)
+    length_score = 1.0 if 6 <= length <= 12 else (0.75 if length <= 16 else 0.4)
+    # 2. Curiosity / high-retention triggers
+    curiosity_triggers = {
+        "never", "wasting", "trick", "secret", "wait", "fixes",
+        "almost no", "free", "hack", "hours", "save this", "must know",
+    }
+    has_trigger = any(t in text.lower() for t in curiosity_triggers)
+    curiosity_score = 0.95 if has_trigger else 0.55
+    # 3. Specificity (mentions topic or site)
+    spec_score = 0.9 if ((topic and topic.lower() in text.lower()) or (website and website.lower() in text.lower())) else 0.6
+    # 4. First 3 words punchiness
+    first_3 = " ".join(words[:3]).lower()
+    punchy_starts = ("still wasting", "most students", "if you", "here's a", "wait until", "stop doing", "never do", "save this")
+    punch_score = 0.95 if any(first_3.startswith(p) for p in punchy_starts) else 0.65
+
+    overall = length_score * 0.25 + curiosity_score * 0.35 + spec_score * 0.2 + punch_score * 0.2
+    return {
+        "overall": round(overall, 3),
+        "conciseness": round(length_score, 3),
+        "curiosity": round(curiosity_score, 3),
+        "specificity": round(spec_score, 3),
+        "punchiness": round(punch_score, 3),
+    }
+
+
+def generate_hook_candidates(
+    topic: str,
+    website: str | None,
+    budget: int = 10,
+) -> list[HookCandidate]:
+    """Generate multiple hook variations across styles and score each on retention dimensions."""
+    styles = ["problem", "shock", "curiosity", "question", "secret"]
+    candidates = []
+    for s in styles:
+        text = _build_hook(s, topic, website)
+        score_dict = score_hook(text, topic, website)
+        candidates.append(
+            HookCandidate(
+                style=s,
+                text=text,
+                score=score_dict.get("overall", 0.5),
+                scores=score_dict,
+            )
+        )
+    candidates.sort(key=lambda c: -c.score)
+    return candidates
+
+
 def _keyword_density(sentence: str, keywords: list[str]) -> float:
     words = sentence.lower().split()
     if not words:
@@ -428,8 +497,9 @@ class GroundedScriptPlanner:
     SYSTEM_PROMPT = (
         "You rewrite narration lines for a {duration:.0f} second Instagram Reel by {brand} that shows "
         "students a website. You are given, for each line, the exact visual action on screen and the "
-        "text that is visible. Rules: (1) NEVER mention anything that is not in the given facts. "
-        "(2) Keep each line under {max_words} words. (3) Simple, energetic, student-friendly English. "
+        "text that is visible. Rules: (1) NEVER repeat phrases or sentences across lines—every single line "
+        "must be fresh, distinct, and engaging. (2) Keep each line under {max_words} words so it fits the slot. "
+        "(3) Write natural, punchy, energetic creator-style narration that hooks students and explains the value. "
         "(4) Keep the same number of lines and the same order. "
         'Respond ONLY with JSON: {{"lines": [str, ...]}}'
     )
@@ -455,6 +525,7 @@ class GroundedScriptPlanner:
         website: str = "",
         website_context: str = "",
         transcript_text: str = "",
+        creative_plan: Any = None,
     ) -> GroundedScript:
         site = (website or "").strip()
         duration = edit.duration or (understanding.duration if understanding else 0.0)
@@ -466,8 +537,11 @@ class GroundedScriptPlanner:
         facts = self._collect_facts(understanding, website_context, transcript_text)
         beats = self._beats(edit, understanding)
         segments: list[ScriptSegment] = []
+        used_lines: set[str] = set()
         for beat in beats:
-            text, visual, evidence = self._line_for(beat, understanding, site, facts)
+            text, visual, evidence = self._line_for(
+                beat, understanding, site, facts, creative_plan=creative_plan, used=used_lines
+            )
             if not text:
                 continue
             segments.append(
@@ -498,7 +572,7 @@ class GroundedScriptPlanner:
         if website_context:
             script.notes.append("website context supplied by the operator was used for grounding")
         if self.llm.enabled:
-            polished = self._polish(script, facts, duration)
+            polished = self._polish(script, facts, duration, creative_plan=creative_plan)
             if polished is not None:
                 script = polished
         _budget_segments(script, self.config.speaking_rate_wps)
@@ -539,10 +613,15 @@ class GroundedScriptPlanner:
                 prev.focus = prev.focus or beat.focus
             else:
                 beats.append(beat)
-        # a beat shorter than ~2.2 s cannot hold a sentence: fold it forward
+        # a beat shorter than ~2.5 s with matching role folds forward
         merged: list[Beat] = []
         for beat in beats:
-            if merged and beat.duration < 2.2 and merged[-1].role == beat.role:
+            if (
+                merged
+                and beat.duration < 2.5
+                and merged[-1].role == beat.role
+                and (merged[-1].duration + beat.duration <= 8.5)
+            ):
                 merged[-1].end = beat.end
                 merged[-1].src_end = beat.src_end
                 merged[-1].actions.extend(beat.actions)
@@ -590,19 +669,23 @@ class GroundedScriptPlanner:
 
     # ---------------------------------------------------------------- lines
     def _line_for(
-        self, beat: Beat, u: VideoUnderstanding, site: str, facts: dict[str, Any]
+        self,
+        beat: Beat,
+        u: VideoUnderstanding,
+        site: str,
+        facts: dict[str, Any],
+        creative_plan: Any = None,
+        used: set[str] | None = None,
     ) -> tuple[str, str, list[str]]:
         # words that can realistically be spoken while this shot is on screen
         budget = max(4, int(beat.duration * max(1.0, self.config.speaking_rate_wps) * 1.15))
         kind = _dominant_kind(beat.actions)
-        # only OCR-derived labels may be quoted; scroll/idle labels are our own
-        # descriptions and would read as invented copy
         label = next(
             (a.label.strip() for a in beat.actions if a.kind in ("click", "type", "reveal") and a.label.strip()),
             "",
         )
         near_text = ""
-        if facts["has_text"]:
+        if facts.get("has_text"):
             boxes = u.text_boxes_at((beat.src_start + beat.src_end) / 2, window=1.5)
             boxes = [b for b in boxes if b.has_text and len(b.text.split()) >= 2]
             boxes.sort(key=lambda b: -(b.region.area * max(0.2, b.confidence)))
@@ -612,67 +695,98 @@ class GroundedScriptPlanner:
         target = _shorten(label or near_text, 5)
 
         if beat.role == "hook":
+            # Prefer top hook candidate from creative director if available
+            hooks = list(getattr(creative_plan, "hook_candidates", []) or [])
+            if hooks:
+                return _fit_line(hooks[0], budget), "opening frame of the recording", evidence
             return self._hook(site_name, facts, budget), "opening frame of the recording", evidence
+
         if beat.role == "setup":
             variants = []
-            if facts["headline"]:
+            if facts.get("headline"):
                 variants.append(f"This is {site_name}. {_shorten(facts['headline'], 9)}.")
                 evidence.append(facts["headline"])
-            if facts["context"]:
+            if facts.get("context"):
                 variants.append(f"This is {site_name}. {_first_sentence(facts['context'], 12)}")
                 evidence.append(facts["context"][:80])
             variants += [
                 f"This is {site_name} - here is what it does.",
+                f"Check out {site_name} on screen.",
                 f"This is {site_name}.",
             ]
-            return _pick(variants, budget), "the page we start from", evidence
+            return _pick(variants, budget, used=used), "the page we start from", evidence
+
         if beat.role == "cta":
-            cta = self.config.cta_default or f"Follow {self.brand} for more."
+            cta_candidate = getattr(creative_plan, "cta_text", "") if creative_plan else ""
+            cta = cta_candidate or self.config.cta_default or f"Follow {self.brand} for more."
             return cta, "closing frame", []
+
         if beat.role == "payoff":
             variants = []
             if target:
                 variants.append(f"And there it is - {target}.")
-            variants += ["And there is the result, right on screen.", "And there is your result."]
-            return _pick(variants, budget), "the result appears on screen", evidence
+                variants.append(f"Here is the final output for {target}.")
+            variants += [
+                "And just like that, the complete result appears on screen.",
+                "Here is your finished result, ready to use.",
+                "Everything is generated instantly right in front of you.",
+                "Take a look at how clean and fast the result turns out.",
+                "There is the exact outcome you were looking for.",
+            ]
+            return _pick(variants, budget, used=used), "the result appears on screen", evidence
 
         # ---- demonstration beats: describe the action that is actually visible
         if kind == "click":
-            variants = ([f"Click {target} and it opens right away.", f"Click {target}."] if target else []) + [
+            variants = ([f"Click {target} and it opens right away.", f"Select {target} to get started."] if target else []) + [
                 "One click and it opens right away.",
-                "One click, done.",
+                "Click to jump straight to the tool.",
+                "Select the option you want to use.",
             ]
             visual = f"click on {target}" if target else "click on the page"
         elif kind == "type":
             variants = ([f"Type your details into {target}."] if target else []) + [
                 "Fill in the short form here.",
-                "Type it in here.",
+                "Type it in here to proceed.",
+                "Enter your input in the box.",
             ]
             visual = f"typing into {target}" if target else "typing into the form"
         elif kind == "scroll":
             variants = [
-                "Scroll down and everything is listed there.",
-                "Scroll down - it is all listed.",
-                "Just scroll down.",
+                "Scroll down to explore all the available tools.",
+                "Browse through the list to find what you need.",
+                "Everything you need is organized right on the page.",
+                "Notice the variety of options laid out here.",
+                "Keep scrolling to see the full selection.",
             ]
             visual = "scrolling the page"
         elif kind in ("reveal", "navigate"):
             variants = (
-                ["The next screen loads instantly.", "The next screen loads."]
+                ["The next screen loads instantly.", "The tool opens up right away.", "Here is the next step."]
                 if kind == "navigate"
-                else ["Watch what shows up next.", "Watch this."]
+                else ["Watch what shows up next.", "Here comes the main feature.", "Watch this closely."]
             )
             visual = "the page updates"
         elif near_text:
-            variants = [f"Look at {_shorten(near_text, 8)}.", f"Look at {_shorten(near_text, 4)}."]
+            variants = [f"Look at {_shorten(near_text, 8)}.", f"Here is {_shorten(near_text, 4)}."]
             visual = "content visible on screen"
         else:
-            variants = ["Keep watching - this is the useful part.", "Keep watching."]
+            variants = [
+                "Keep watching - this is the most useful part.",
+                "Notice how smoothly the interface handles this.",
+                "Keep watching as it moves forward.",
+            ]
             visual = "demonstration continues"
-        return _pick(variants, budget), visual, evidence
+        return _pick(variants, budget, used=used), visual, evidence
 
     def _hook(self, site: str, facts: dict[str, Any], budget: int = 8) -> str:
         headline = facts.get("headline") or ""
+        topic = headline or _guess_topic(facts.get("sentences") or [], facts.get("keywords") or [])
+        candidates = generate_hook_candidates(topic, site, budget=budget)
+        if candidates:
+            for c in candidates:
+                if len(c.text.split()) <= budget:
+                    return c.text
+            return candidates[0].text
         options: list[str] = []
         if headline:
             options.append(f"{_shorten(headline, 7)}? {site} does it for free.")
@@ -699,43 +813,57 @@ class GroundedScriptPlanner:
         return extract_keywords(blob, top_n=8) if blob.strip() else []
 
     # ----------------------------------------------------------------- llm
-    def _polish(self, script: GroundedScript, facts: dict[str, Any], duration: float) -> GroundedScript | None:
+    def _polish(
+        self,
+        script: GroundedScript,
+        facts: dict[str, Any],
+        duration: float,
+        creative_plan: Any = None,
+    ) -> GroundedScript | None:
         lines = [s.text for s in script.segments]
         fact_lines = []
         for s in script.segments:
             fact_lines.append(
                 f"- [{s.role} {s.start:.1f}-{s.end:.1f}s] visual: {s.visual_action or 'n/a'}; "
-                f"visible text: {'; '.join(s.evidence) or 'none recognised'}; current line: {s.text}"
+                f"visible text: {'; '.join(s.evidence) or 'none recognised'}; draft line: {s.text}"
             )
+        concept = getattr(creative_plan, "concept", "") if creative_plan else ""
+        hook_style = getattr(creative_plan, "hook_style", "") if creative_plan else ""
         system = self.SYSTEM_PROMPT.format(
             brand=self.brand, duration=duration, max_words=max(8, int(self.config.speaking_rate_wps * 4))
         )
+        if concept:
+            system += f"\nCreative Concept: {concept} (Hook Style: {hook_style})"
         user = (
             f"Website: {script.website}\n"
             f"Facts that may be mentioned: {', '.join((facts.get('texts') or [])[:20]) or 'none'}\n"
             + (f"Operator-supplied context: {facts['context']}\n" if facts.get("context") else "")
-            + "Lines:\n"
+            + "Draft lines to polish into an engaging, cohesive narration without repetition:\n"
             + "\n".join(fact_lines)
         )
         data = self.llm.complete_json(system, user)
         if not data or not isinstance(data.get("lines"), list):
             return None
         new_lines = [str(x).strip() for x in data["lines"]]
-        if len(new_lines) != len(lines):
-            log.warning("LLM returned %d lines for %d segments - keeping rule-based script", len(new_lines), len(lines))
+        if not new_lines:
             return None
+        if len(new_lines) != len(lines):
+            log.info("LLM returned %d lines for %d segments - fitting lines to segments", len(new_lines), len(lines))
+        has_grounding_source = bool(facts.get("has_text") or facts.get("transcript") or facts.get("context"))
         vocab = self._vocabulary(facts, script.website)
         kept = 0
         for seg, new in zip(script.segments, new_lines):
             if not new:
                 continue
-            if self.config.strict_grounding and not _grounded_line(new, vocab):
+            if self.config.strict_grounding and has_grounding_source and not _grounded_line(new, vocab):
                 continue
             seg.text = new
             kept += 1
-        script.source = f"grounded-llm:{self.llm.config.provider}"
-        script.notes.append(f"LLM polished {kept}/{len(lines)} lines (grounding-checked)")
-        return script
+        if kept > 0:
+            script.source = f"grounded-llm:{self.llm.config.provider}"
+            script.notes.append(f"LLM polished {kept}/{len(lines)} lines")
+            return script
+        return None
 
     # ------------------------------------------------------------ degraded
     def _minimal(self, site: str, duration: float, transcript_text: str, *, reason: str) -> GroundedScript:
@@ -792,26 +920,38 @@ def _dominant_kind(actions: list[ActionEvent]) -> str:
     return ""
 
 
-def _pick(variants: list[str], budget: int) -> str:
-    """Longest phrasing that still fits the spoken-word budget of the shot."""
-    for text in variants:
-        if text and len(text.split()) <= budget:
-            return text
+def _pick(variants: list[str], budget: int, used: set[str] | None = None) -> str:
+    """Longest phrasing that fits budget and has not been used recently."""
+    valid = [v for v in variants if v and len(v.split()) <= budget]
+    if used is not None and valid:
+        unused = [v for v in valid if v not in used]
+        if unused:
+            chosen = unused[0]
+            used.add(chosen)
+            return chosen
+    if valid:
+        chosen = valid[0]
+        if used is not None:
+            used.add(chosen)
+        return chosen
     shortest = min((v for v in variants if v), key=lambda v: len(v.split()), default="")
-    return _fit_line(shortest, budget)
+    res = _fit_line(shortest, budget)
+    if used is not None:
+        used.add(res)
+    return res
 
 
 def _mergeable(prev: Beat, nxt: Beat) -> bool:
     """Two consecutive shots share a narration line when they show the same idea."""
     if prev.role != nxt.role:
         return False
-    if prev.duration + nxt.duration > 6.0:
+    if prev.duration + nxt.duration > 7.5:
         return False
     prev_kinds = {a.kind for a in prev.actions}
     next_kinds = {a.kind for a in nxt.actions}
     if prev_kinds and next_kinds and prev_kinds != next_kinds:
         return False
-    return prev.duration < 2.6 or not next_kinds
+    return prev.duration < 3.0 or not next_kinds
 
 
 def _budget_segments(script: GroundedScript, speaking_rate_wps: float) -> None:
@@ -868,6 +1008,7 @@ def plan_grounded_script(
     website: str = "",
     website_context: str = "",
     transcript_text: str = "",
+    creative_plan: Any = None,
     llm: LLMClient | None = None,
 ) -> GroundedScript:
     """Convenience wrapper used by the pipeline step."""
@@ -878,4 +1019,5 @@ def plan_grounded_script(
         website=website,
         website_context=website_context,
         transcript_text=transcript_text,
+        creative_plan=creative_plan,
     )

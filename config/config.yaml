@@ -111,6 +111,108 @@ presets:
       font_size: 52
       word_level: false
 
+  # High-energy, fast-paced showcase for new AI tools and apps.
+  ai_tool:
+    creative:
+      hook_style: "curiosity"
+      music_mood: "tech"
+      music_energy: 0.8
+      editing_intensity: 0.75
+      zoom_intensity: 0.5
+      caption_style: "bold"
+      cover_style: "bold_text_screenshot"
+    subtitles:
+      style: "bold-pop"
+      font_size: 70
+      word_level:
+        enabled: true
+    audio:
+      mix:
+        music_volume: 0.10
+
+  # Clean, structured demonstration for productivity tools and workflows.
+  productivity:
+    creative:
+      hook_style: "problem"
+      music_mood: "upbeat"
+      music_energy: 0.6
+      editing_intensity: 0.5
+      zoom_intensity: 0.3
+      caption_style: "minimal"
+    subtitles:
+      style: "clean"
+      font_size: 64
+    audio:
+      mix:
+        music_volume: 0.07
+
+  # Developer and coding tools with sharp text emphasis and calm tech background.
+  coding:
+    creative:
+      hook_style: "question"
+      music_mood: "tech"
+      music_energy: 0.5
+      editing_intensity: 0.4
+      zoom_intensity: 0.45
+      layout_preference: "canvas"
+    subtitles:
+      style: "terminal"
+      font_size: 60
+    audio:
+      mix:
+        music_volume: 0.06
+
+  # Quick discovery reels focusing on "hidden gem" websites for students.
+  website_discovery:
+    creative:
+      hook_style: "shock"
+      music_mood: "energetic"
+      music_energy: 0.85
+      editing_intensity: 0.8
+      zoom_intensity: 0.6
+      caption_style: "bold"
+    subtitles:
+      style: "bold-pop"
+      font_size: 72
+      word_level:
+        enabled: true
+    audio:
+      mix:
+        music_volume: 0.11
+
+  # Step-by-step tutorial format with clear pacing and guidance.
+  tutorial:
+    creative:
+      hook_style: "problem"
+      music_mood: "calm"
+      music_energy: 0.4
+      editing_intensity: 0.4
+      zoom_intensity: 0.25
+      pacing: 0.4
+    subtitles:
+      style: "clean"
+      font_size: 62
+    audio:
+      mix:
+        music_volume: 0.05
+
+  # Elegant, high-end minimal aesthetic with smooth transitions.
+  premium_minimal:
+    creative:
+      hook_style: "intrigue"
+      music_mood: "ambient"
+      music_energy: 0.35
+      editing_intensity: 0.3
+      zoom_intensity: 0.15
+      motion_style: "smooth"
+      layout_preference: "fill"
+    subtitles:
+      style: "minimal"
+      font_size: 58
+    audio:
+      mix:
+        music_volume: 0.04
+
 project:
   name: "ContentForge-AI"
   brand: "StudentTools.pk"

@@ -12,6 +12,9 @@ faster-whisper>=1.0
 psutil>=5.9
 requests>=2.31
 
+# LLM provider (Gemini recommended)
+google-generativeai>=0.8
+
 # Text-to-speech backends (install the ones you use)
 piper-tts>=1.2
 edge-tts>=6.1

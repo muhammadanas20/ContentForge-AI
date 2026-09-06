@@ -117,6 +117,11 @@ class OverlayPlan:
     hook_text: str = ""
     cta_text: str = ""
 
+    @property
+    def captions(self) -> list[CaptionChunk]:
+        """Alias for chunks for compatibility with QA evaluators."""
+        return self.chunks
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "duration": round(self.duration, 3),

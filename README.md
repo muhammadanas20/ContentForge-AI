@@ -28,19 +28,19 @@ data/output/smallpdfcom-convert-pdf-a1b2c3/
 
 | Area | What you get |
 |---|---|
-| **Zero-touch** | Watchdog folder watcher, resumable pipeline, automatic retries, crash recovery |
-| **Video understanding** | Samples frames, reads the screen (tesseract OCR or a dependency-free heuristic text detector), tracks the cursor and builds an **action timeline** - clicks, scrolling, typing, page reveals, idle time - before any editing decision is made |
-| **Content-aware 9:16** | Framing is *scored*, not guessed: keep the important text, never slice a headline in half, respect a hard max zoom, prefer a designed canvas (the 16:9 recording inside a branded composition) over a context-destroying crop; smoothed camera path |
-| **Grounded script** | Hook → setup → demonstration → payoff → CTA, where every line is tied to a real visual segment (`visual_action`, `focus_region`, source timestamps). Never invents features; optional LLM polish behind a grounding guard |
-| **AI voice** | Piper (offline), Kokoro, Edge, eSpeak NG fallback - narration is synthesised **per segment and fitted to the edit timeline**, so it is always as long as the Reel |
-| **Smart editor** | Dead-time removal (screen *and* audio idle), action-based cuts, result hold, dynamic zooms, cursor emphasis, click rings + ticks, viral structure applied to real shot boundaries |
-| **Captions** | Word-highlighted chunks (≤ 4 words) in mobile-safe type, positioned away from the important UI, long words auto-shrunk, plus progress bar, watermark and hook/CTA cards - one libass pass. The 4 classic subtitle styles remain for `pipeline.mode: classic` |
-| **Cover** | Candidate frames are scored (result reveal, text density, stillness, in-edit) and three cover concepts are rendered - the best-measuring branded 1080x1920 cover wins |
-| **Quality gates** | 9:16, OCR-region preservation, cursor visible at clicks, narration present and timeline-matched, captions present and on-screen, duration, audio levels, cover, disk hygiene - a failing Reel is never packaged |
-| **Publishing kit** | Thumbnail + Canva brief, Instagram caption, rotating category-balanced hashtags, CTA & comment prompt, SEO description, YouTube title |
-| **Ops** | SQLite/PostgreSQL job store, Streamlit dashboard (queue, errors, logs, analytics, storage, health), APScheduler jobs, low-disk design (early intermediate deletion, verified-package cleanup, free-space floor), dated Rich logs |
-| **Presets** | `student_reel` (production look) and `fast_preview`; `contentforge --preset <name>` or `CONTENTFORGE_PRESET` |
-| **Quality** | 145 pytest tests incl. real FFmpeg renders, ground-truth detection tests on a synthetic tutorial recording, visual regression on the rendered Reel, and end-to-end runs of both pipelines; typed Pydantic config, `.env` for secrets |
+| **AI Creative Director (v0.4)** | Evaluates visual recording signals to produce a unified master `CreativePlan` shaping pacing, layout preference, narrative arc, captions, music, and cover |
+| **Gemini LLM & Vision (v0.4)** | Native Google Gemini multimodal integration (`gemini-2.5-flash`) for deep semantic video understanding and vision-grounded script writing |
+| **Multi-Candidate Hooks (v0.4)** | Generates multi-style hooks (curiosity, problem, shock, question, secret) with retention & punchiness scoring algorithms |
+| **Music & SFX Library (v0.4)** | Mood-based background music selection from licensed catalog with automatic ducking under narration and tactile UI action SFX |
+| **Canva Integration (v0.4)** | Optional Canva Connect API cover generation with automated capability detection and 100% offline Pillow fallback |
+| **Creative Presets (v0.4)** | 8 tailored presets: `student_reel`, `ai_tool`, `productivity`, `coding`, `website_discovery`, `tutorial`, `premium_minimal`, and `fast_preview` |
+| **Brand Identity (v0.4)** | Formal brand configuration (`config/brand.yaml`) governing typography, color palette, handles, and CTA across the pipeline |
+| **Creative Quality QA (v0.4)** | 10-dimension artistic score (hook strength, 3s clarity, pacing, payoff, readability) complementing the 15+ technical quality gates |
+| **Video understanding** | Samples frames, reads the screen (tesseract or heuristic OCR), tracks cursor and builds an action timeline before editing decisions |
+| **Content-aware 9:16** | 8-factor scoring function: keep important text, avoid slicing headlines, smoothed camera pan, canvas vs fill framing |
+| **AI Voice & Timing** | Piper (offline), Kokoro, Edge, eSpeak NG - narration synthesised per-segment and timeline-fitted to the Reel duration |
+| **Smart Editor** | Dead-time removal (screen and audio idle), action-based cuts, result hold, dynamic zooms, cursor emphasis, click rings |
+| **Operations & CLI** | `contentforge inspect`, `quality`, `music`, `canva`, `templates`, `doctor`, and Streamlit dashboard |
 
 ## Quick start (Fedora)
 
@@ -48,7 +48,7 @@ data/output/smallpdfcom-convert-pdf-a1b2c3/
 git clone https://github.com/muhammadanas20/ContentForge-AI && cd ContentForge-AI
 scripts/install_fedora.sh          # ffmpeg (RPM Fusion), fonts, venv, python deps
 source .venv/bin/activate
-contentforge doctor                # verify ffmpeg / whisper / TTS / disk
+contentforge doctor                # verify ffmpeg / whisper / TTS / disk / Gemini
 contentforge run                   # start watching data/input  (Ctrl-C to stop)
 # in another terminal:
 contentforge dashboard             # http://localhost:8501
@@ -61,10 +61,12 @@ Naming the file after the website (e.g. `smallpdf.com - merge.mp4`) lets the scr
 Manual alternatives:
 
 ```bash
-contentforge process data/input/demo.mp4 --website smallpdf.com   # one file, now
-contentforge retry <job_id> --from subtitles                        # re-render after changing styles
-contentforge jobs --status failed                                   # what went wrong
-contentforge cleanup --dry-run                                      # what cleanup would delete
+contentforge process data/input/demo.mp4 --website smallpdf.com --preset ai_tool  # one file with preset
+contentforge inspect <job_id>                                                     # inspect artifacts & plan
+contentforge quality <job_id>                                                     # check quality gates & score
+contentforge retry <job_id> --from subtitles                                      # re-render after changing styles
+contentforge jobs --status failed                                                 # what went wrong
+contentforge cleanup --dry-run                                                    # what cleanup would delete
 contentforge analytics add <job_id> --views 1200 --likes 90 --completion 58
 contentforge analytics report
 ```
@@ -78,7 +80,8 @@ Override locally with `config/config.local.yaml` (git-ignored) or environment va
 Commonly tuned keys:
 
 ```yaml
-pipeline.mode: smart | classic           # v0.3 Reel pipeline (default) or the v0.2 flow
+pipeline.mode: smart | classic           # v0.4 Reel pipeline (default) or the v0.2 flow
+preset: "student_reel"                   # student_reel, ai_tool, coding, productivity...
 understanding.sample_fps: 6.0            # main CPU knob for the understanding stage
 understanding.ocr_engine: auto           # auto | tesseract | heuristic
 framing.max_zoom: 3.6                    # hard cap - never a context-destroying crop
@@ -96,19 +99,19 @@ See [docs/configuration.md](docs/configuration.md) for every key.
 
 | Doc | Contents |
 |---|---|
+| [docs/VISION_V04.md](docs/VISION_V04.md) | **v0.4 Vision**: The premium AI creative production engine |
+| [docs/CREATIVE_ENGINE.md](docs/CREATIVE_ENGINE.md) | **Creative Engine**: Creative Director, presets, multi-candidate hooks |
+| [docs/ARCHITECTURE_AUDIT.md](docs/ARCHITECTURE_AUDIT.md) | Subsystem architecture audit (KEEP/CHANGE/REMOVE/ADD) |
+| [docs/EDITING_ENGINE.md](docs/EDITING_ENGINE.md) | Smart editor cuts, zooms, safe-margins, framing |
+| [docs/QUALITY_SYSTEM.md](docs/QUALITY_SYSTEM.md) | Technical quality gates & 10-dimension creative QA scoring |
+| [docs/MUSIC_SYSTEM.md](docs/MUSIC_SYSTEM.md) | Music catalog, licensing rules, mood matching & SFX library |
+| [docs/CANVA_INTEGRATION.md](docs/CANVA_INTEGRATION.md) | Canva Connect API integration, OAuth & Pillow fallback |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | CLI guide (`inspect`, `quality`, `music`, `canva`, `templates`) |
 | [docs/installation.md](docs/installation.md) | Fedora / generic Linux setup, Python env, models, optional Kokoro/Edge/Ollama, systemd |
 | [docs/configuration.md](docs/configuration.md) | Every YAML key, env overrides, `.env` |
-| [docs/smart-pipeline.md](docs/smart-pipeline.md) | **v0.3**: how understanding, content-aware framing, grounded scripting, the smart editor, captions, cover and the quality gates work |
-| [docs/architecture.md](docs/architecture.md) | Module map, data flow, design decisions |
-| [docs/workflow.md](docs/workflow.md) | Step-by-step pipeline, resume semantics, output package |
-| [docs/dashboard.md](docs/dashboard.md) | Dashboard pages and actions |
-| [docs/scheduling.md](docs/scheduling.md) | Immediate vs scheduled mode, APScheduler, cron, systemd |
-| [docs/analytics.md](docs/analytics.md) | Metrics, scoring, suggestions, CSV import |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Common errors, FAQ |
-| [docs/maintenance.md](docs/maintenance.md) | Updating, backup, restore, cleanup policy |
-| [docs/testing.md](docs/testing.md) | Running and writing tests; what is unit / integration / real-model tested |
-| [docs/fedora-real-system-test.md](docs/fedora-real-system-test.md) | Exact Fedora commands: deps, Whisper/Piper download, TTS + alignment checks, first video, low-disk config, cleanup |
-| [ROADMAP.md](ROADMAP.md) | Status and next tasks |
+| [docs/smart-pipeline.md](docs/smart-pipeline.md) | Core pipeline architecture and stage execution |
+| [docs/testing.md](docs/testing.md) | Running and writing tests; unit, integration & real-model |
+| [ROADMAP.md](ROADMAP.md) | Status and roadmap |
 
 ## Project layout
 

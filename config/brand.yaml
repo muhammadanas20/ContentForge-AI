@@ -1,0 +1,26 @@
+# Brand configuration for ContentForge-AI
+name: "StudentTools.pk"
+handle: "@studenttools.pk"
+tagline: "Free tools & websites every student must know."
+target_audience: "Pakistani university and college students"
+tone_of_voice: "energetic, practical, concise, hype-free"
+default_cta: "Follow @studenttools.pk for more free student tools."
+
+typography:
+  primary_font: "DejaVuSans-Bold.ttf"
+  secondary_font: "DejaVuSans.ttf"
+  accent_font: "DejaVuSans-Bold.ttf"
+  headline_case: "title"
+
+palette:
+  primary: "#FF5722"
+  secondary: "#2196F3"
+  background_dark: "#121212"
+  background_card: "#1E1E1E"
+  text_primary: "#FFFFFF"
+  text_muted: "#B0B0B0"
+  highlight: "#FFD700"
+
+logo_path: ""
+watermark_enabled: false
+watermark_opacity: 0.6
