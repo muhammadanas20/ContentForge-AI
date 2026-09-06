@@ -399,10 +399,18 @@ class SmartEditor:
         info = self.ff.probe(src)
         size = (info.width, info.height)
         files: list[Path] = []
-        for shot in plan.shots:
+        prev: Shot | None = None
+        for i, shot in enumerate(plan.shots):
             out = work / f"shot_{shot.index:03d}.mp4"
-            self.render_shot(src, shot, out, source_size=size)
+            # A transition only makes sense where the source actually jumps
+            # (dead time removed). Consecutive shots of the same take are hard
+            # cuts - fading those would just look like a flicker.
+            jump_in = prev is not None and abs(shot.src_start - prev.src_end) > 0.05
+            nxt = plan.shots[i + 1] if i + 1 < len(plan.shots) else None
+            jump_out = nxt is not None and abs(nxt.src_start - shot.src_end) > 0.05
+            self.render_shot(src, shot, out, source_size=size, fade_in=jump_in, fade_out=jump_out)
             files.append(out)
+            prev = shot
         if not files:
             raise RuntimeError("edit plan contains no shots")
         if len(files) == 1:
@@ -416,12 +424,21 @@ class SmartEditor:
         return RenderResult(path=dst, duration=duration, shots=len(plan.shots))
 
     # --------------------------------------------------------------- shots
-    def render_shot(self, src: Path, shot: Shot, dst: Path, *, source_size: tuple[int, int]) -> Path:
+    def render_shot(
+        self,
+        src: Path,
+        shot: Shot,
+        dst: Path,
+        *,
+        source_size: tuple[int, int],
+        fade_in: bool = False,
+        fade_out: bool = False,
+    ) -> Path:
         sw, sh = source_size
         if not sw or not sh:
             info = self.ff.probe(src)
             sw, sh = info.width, info.height
-        graph = self.shot_filter(shot, sw, sh)
+        graph = self.shot_filter(shot, sw, sh, fade_in=fade_in, fade_out=fade_out)
         args = [
             "-ss",
             f"{shot.src_start:.3f}",
@@ -451,8 +468,10 @@ class SmartEditor:
         self.ff.run(args, timeout=3600)
         return dst
 
-    def shot_filter(self, shot: Shot, sw: int, sh: int) -> str:
-        """Build the filter graph for one shot (crop -> layout -> zoom)."""
+    def shot_filter(
+        self, shot: Shot, sw: int, sh: int, *, fade_in: bool = False, fade_out: bool = False
+    ) -> str:
+        """Build the filter graph for one shot (crop -> layout -> zoom -> fade)."""
         tw, th = self.s.width, self.s.height
         vw = _even(shot.view.w * sw)
         vh = _even(shot.view.h * sh)
@@ -498,17 +517,30 @@ class SmartEditor:
                 f"color={_c(self.s.accent)}@0.85:t=4[bordered]"
             )
             parts.append(border.replace("[bordered]", "[v0]"))
-            parts.append(f"[v0]format={self.s.pix_fmt}[v]")
+            parts.append(f"[v0]format={self.s.pix_fmt}{self._fade(shot, fade_in, fade_out)}[v]")
         else:
             head = "[0:v]" + ",".join(chain)
+            fade = self._fade(shot, fade_in, fade_out)
             if zooming:
                 zw = _even(tw * self.s.zoom_headroom)
                 zh = _even(th * self.s.zoom_headroom)
                 parts.append(f"{head},scale={zw}:{zh}[scaled]")
-                parts.append(f"[scaled]{self._zoom_filter(shot, tw, th)}[v]")
+                parts.append(f"[scaled]{self._zoom_filter(shot, tw, th)}{fade}[v]")
             else:
-                parts.append(f"{head},scale={tw}:{th},format={self.s.pix_fmt}[v]")
+                parts.append(f"{head},scale={tw}:{th},format={self.s.pix_fmt}{fade}[v]")
         return ";".join(parts)
+
+    def _fade(self, shot: Shot, fade_in: bool, fade_out: bool) -> str:
+        """A very short dip at real cuts only (where the source jumps)."""
+        if not self.s.transitions:
+            return ""
+        d = max(0.04, min(self.s.transition_duration, shot.out_duration / 3))
+        bits = []
+        if fade_in:
+            bits.append(f"fade=t=in:st=0:d={d:.3f}")
+        if fade_out:
+            bits.append(f"fade=t=out:st={max(0.0, shot.out_duration - d):.3f}:d={d:.3f}")
+        return ("," + ",".join(bits)) if bits else ""
 
     def _zoom_filter(self, shot: Shot, tw: int, th: int) -> str:
         d = max(0.2, shot.out_duration)
